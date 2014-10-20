@@ -7129,8 +7129,9 @@ static int hpsa_request_irqs(struct ctlr_info *h,
 		}
 	}
 	if (rc) {
-		dev_err(&h->pdev->dev, "unable to get irq %d for %s\n",
+		dev_err(&h->pdev->dev, "failed to get irq %d for %s\n",
 		       h->intr[h->intr_mode], h->devname);
+		hpsa_free_irqs(h);
 		return -ENODEV;
 	}
 	return 0;
