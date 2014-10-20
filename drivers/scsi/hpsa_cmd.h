@@ -428,6 +428,7 @@ struct CommandList {
 	struct completion *waiting;
 	struct scsi_cmnd *scsi_cmd;
 	struct work_struct work;
+	struct delayed_work abort_torture_work;
 
 	/* For commands using either of the two "ioaccel" paths to
 	 * bypass the RAID stack and go directly to the physical disk
