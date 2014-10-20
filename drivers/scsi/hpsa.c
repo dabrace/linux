@@ -3723,13 +3723,17 @@ static int hpsa_scsi_ioaccel1_queue_command(struct ctlr_info *h,
 	u32 control = IOACCEL1_CONTROL_SIMPLEQUEUE;
 
 	/* TODO: implement chaining support */
-	if (scsi_sg_count(cmd) > h->ioaccel_maxsg)
+	if (scsi_sg_count(cmd) > h->ioaccel_maxsg) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return IO_ACCEL_INELIGIBLE;
+	}
 
 	BUG_ON(cmd->cmd_len > IOACCEL1_IOFLAGS_CDBLEN_MAX);
 
-	if (fixup_ioaccel_cdb(cdb, &cdb_len))
+	if (fixup_ioaccel_cdb(cdb, &cdb_len)) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return IO_ACCEL_INELIGIBLE;
+	}
 
 	c->cmd_type = CMD_IOACCEL1;
 
@@ -3737,13 +3741,6 @@ static int hpsa_scsi_ioaccel1_queue_command(struct ctlr_info *h,
 	c->busaddr = (u32) h->ioaccel_cmd_pool_dhandle +
 				(c->cmdindex * sizeof(*cp));
 	BUG_ON(c->busaddr & 0x0000007F);
-
-	/* Try to honor the device's queue depth */
-	if (atomic_inc_return(&phys_disk->ioaccel_cmds_out) >
-					phys_disk->queue_depth) {
-		atomic_dec(&phys_disk->ioaccel_cmds_out);
-		return IO_ACCEL_INELIGIBLE;
-	}
 
 	use_sg = scsi_dma_map(cmd);
 	if (use_sg < 0) {
@@ -3948,11 +3945,16 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 	u32 len;
 	u32 total_len = 0;
 
-	if (scsi_sg_count(cmd) > h->ioaccel_maxsg)
+	if (scsi_sg_count(cmd) > h->ioaccel_maxsg) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return IO_ACCEL_INELIGIBLE;
+	}
 
-	if (fixup_ioaccel_cdb(cdb, &cdb_len))
+	if (fixup_ioaccel_cdb(cdb, &cdb_len)) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return IO_ACCEL_INELIGIBLE;
+	}
+
 	c->cmd_type = CMD_IOACCEL2;
 	/* Adjust the DMA address to point to the accelerated command buffer */
 	c->busaddr = (u32) h->ioaccel2_cmd_pool_dhandle +
@@ -3961,13 +3963,6 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 
 	memset(cp, 0, sizeof(*cp));
 	cp->IU_type = IOACCEL2_IU_TYPE;
-
-	/* Try to honor the device's queue depth */
-	if (atomic_inc_return(&phys_disk->ioaccel_cmds_out) >
-						phys_disk->queue_depth) {
-		atomic_dec(&phys_disk->ioaccel_cmds_out);
-		return IO_ACCEL_INELIGIBLE;
-	}
 
 	use_sg = scsi_dma_map(cmd);
 	if (use_sg < 0) {
@@ -4041,6 +4036,12 @@ static int hpsa_scsi_ioaccel_queue_command(struct ctlr_info *h,
 	struct CommandList *c, u32 ioaccel_handle, u8 *cdb, int cdb_len,
 	u8 *scsi3addr, struct hpsa_scsi_dev_t *phys_disk)
 {
+	/* Try to honor the device's queue depth */
+	if (atomic_inc_return(&phys_disk->ioaccel_cmds_out) >
+					phys_disk->queue_depth) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
+		return IO_ACCEL_INELIGIBLE;
+	}
 	if (h->transMethod & CFGTBL_Trans_io_accel1)
 		return hpsa_scsi_ioaccel1_queue_command(h, c, ioaccel_handle,
 						cdb, cdb_len, scsi3addr,
