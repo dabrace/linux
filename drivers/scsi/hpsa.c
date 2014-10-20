@@ -6450,16 +6450,17 @@ static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 /* Called when controller lockup detected. */
 static void fail_all_outstanding_cmds(struct ctlr_info *h)
 {
-	int i;
-	struct CommandList *c = NULL;
+	int i, refcount;
+	struct CommandList *c;
 
 	for (i = 0; i < h->nr_cmds; i++) {
-		if (!test_bit(i & (BITS_PER_LONG - 1),
-				h->cmd_pool_bits + (i / BITS_PER_LONG)))
-			continue;
 		c = h->cmd_pool + i;
-		c->err_info->CommandStatus = CMD_HARDWARE_ERR;
-		finish_cmd(c);
+		refcount = atomic_inc_return(&c->refcount);
+		if (refcount > 1) {
+			c->err_info->CommandStatus = CMD_HARDWARE_ERR;
+			finish_cmd(c);
+		}
+		cmd_free(h, c);
 	}
 }
 
@@ -6496,9 +6497,7 @@ static void controller_lockup_detected(struct ctlr_info *h)
 	dev_warn(&h->pdev->dev, "Controller lockup detected: 0x%08x\n",
 			lockup_detected);
 	pci_disable_device(h->pdev);
-	spin_lock_irqsave(&h->lock, flags);
 	fail_all_outstanding_cmds(h);
-	spin_unlock_irqrestore(&h->lock, flags);
 }
 
 static void detect_controller_lockup(struct ctlr_info *h)
