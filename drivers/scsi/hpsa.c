@@ -4776,6 +4776,9 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 			"ABORT REQUEST FAILED, Controller lookup failed.\n"))
 		return FAILED;
 
+	if (lockup_detected(h))
+		return FAILED;
+
 	/* Check that controller supports some kind of task abort */
 	if (!(HPSATMF_PHYS_TASK_ABORT & h->TMFSupportFlags) &&
 		!(HPSATMF_LOG_TASK_ABORT & h->TMFSupportFlags))
