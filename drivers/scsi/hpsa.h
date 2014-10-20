@@ -53,7 +53,7 @@ struct hpsa_scsi_dev_t {
 					 * offload request to mirror drive
 					 */
 	struct raid_map_data raid_map;	/* I/O accelerator RAID map */
-
+	int supports_aborts;
 };
 
 struct reply_queue_buffer {
