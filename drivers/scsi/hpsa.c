@@ -3391,6 +3391,7 @@ void hpsa_get_ioaccel_drive_info(struct ctlr_info *h,
 				DRIVE_CMDS_RESERVED_FOR_FW;
 	else
 		dev->queue_depth = 7; /* conservative */
+	atomic_set(&dev->ioaccel_cmds_out, 0);
 }
 
 static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
@@ -3738,8 +3739,8 @@ static int hpsa_scsi_ioaccel1_queue_command(struct ctlr_info *h,
 	BUG_ON(c->busaddr & 0x0000007F);
 
 	/* Try to honor the device's queue depth */
-	atomic_inc(&phys_disk->ioaccel_cmds_out);
-	if (atomic_read(&phys_disk->ioaccel_cmds_out) > phys_disk->queue_depth) {
+	if (atomic_inc_return(&phys_disk->ioaccel_cmds_out) >
+					phys_disk->queue_depth) {
 		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return IO_ACCEL_INELIGIBLE;
 	}
@@ -3962,8 +3963,8 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 	cp->IU_type = IOACCEL2_IU_TYPE;
 
 	/* Try to honor the device's queue depth */
-	atomic_inc(&phys_disk->ioaccel_cmds_out);
-	if (atomic_read(&phys_disk->ioaccel_cmds_out) > phys_disk->queue_depth) {
+	if (atomic_inc_return(&phys_disk->ioaccel_cmds_out) >
+						phys_disk->queue_depth) {
 		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return IO_ACCEL_INELIGIBLE;
 	}
