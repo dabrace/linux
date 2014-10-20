@@ -2488,7 +2488,7 @@ static int hpsa_map_one(struct pci_dev *pdev,
 
 #define NO_TIMEOUT ((unsigned long) -1)
 #define DEFAULT_TIMEOUT (30000) /* milliseconds */
-static int __hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
+static int hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
 	struct CommandList *c, int reply_queue, unsigned long timeout_msecs)
 {
 	DECLARE_COMPLETION_ONSTACK(wait);
@@ -2515,7 +2515,7 @@ static int hpsa_scsi_do_simple_cmd(struct ctlr_info *h, struct CommandList *c,
 		c->err_info->CommandStatus = CMD_CTLR_LOCKUP;
 		return 0;
 	}
-	return __hpsa_scsi_do_simple_cmd_core(h, c, reply_queue, timeout_msecs);
+	return hpsa_scsi_do_simple_cmd_core(h, c, reply_queue, timeout_msecs);
 }
 
 static u32 lockup_detected(struct ctlr_info *h)
@@ -2719,7 +2719,7 @@ static int hpsa_send_reset(struct ctlr_info *h, unsigned char *scsi3addr,
 	(void) fill_cmd(c, HPSA_DEVICE_RESET_MSG, h, NULL, 0, 0,
 			scsi3addr, TYPE_MSG);
 	c->Request.CDB[1] = reset_type; /* fill_cmd defaults to LUN reset */
-	rc = __hpsa_scsi_do_simple_cmd_core(h, c, reply_queue, NO_TIMEOUT);
+	rc = hpsa_scsi_do_simple_cmd(h, c, reply_queue, NO_TIMEOUT);
 	if (rc) {
 		dev_warn(&h->pdev->dev, "Failed to send reset command\n");
 		goto out;
@@ -3205,7 +3205,7 @@ static int hpsa_device_supports_aborts(struct ctlr_info *h,
 	c = cmd_alloc(h);
 
 	(void) fill_cmd(c, HPSA_ABORT_MSG, h, &tag, 0, 0, scsi3addr, TYPE_MSG);
-	(void) __hpsa_scsi_do_simple_cmd_core(h, c, 0, NO_TIMEOUT);
+	(void) hpsa_scsi_do_simple_cmd(h, c, 0, NO_TIMEOUT);
 	/* no unmap needed here because no data xfer. */
 	ei = c->err_info;
 	switch (ei->CommandStatus) {
@@ -5035,7 +5035,7 @@ static int hpsa_send_test_unit_ready(struct ctlr_info *h,
 	/* Send the Test Unit Ready, fill_cmd can't fail, no mapping */
 	(void) fill_cmd(c, TEST_UNIT_READY, h,
 			NULL, 0, 0, lunaddr, TYPE_CMD);
-	rc = __hpsa_scsi_do_simple_cmd_core(h, c, reply_queue, NO_TIMEOUT);
+	rc = hpsa_scsi_do_simple_cmd(h, c, reply_queue, NO_TIMEOUT);
 	if (rc)
 		return rc;
 	/* no unmap needed here because no data xfer. */
@@ -5229,9 +5229,9 @@ static int hpsa_send_abort(struct ctlr_info *h, unsigned char *scsi3addr,
 		0, 0, scsi3addr, TYPE_MSG);
 	if (h->needs_abort_tags_swizzled)
 		swizzle_abort_tag(&c->Request.CDB[4]);
-	(void) __hpsa_scsi_do_simple_cmd_core(h, c, reply_queue, NO_TIMEOUT);
+	(void) hpsa_scsi_do_simple_cmd(h, c, reply_queue, NO_TIMEOUT);
 	hpsa_get_tag(h, abort, &taglower, &tagupper);
-	dev_dbg(&h->pdev->dev, "%s: Tag:0x%08x:%08x: do_simple_cmd_core completed.\n",
+	dev_dbg(&h->pdev->dev, "%s: Tag:0x%08x:%08x: do_simple_cmd(abort) completed.\n",
 		__func__, tagupper, taglower);
 	/* no unmap needed here because no data xfer. */
 
@@ -5392,10 +5392,10 @@ static int hpsa_send_abort_ioaccel2(struct ctlr_info *h,
 	c = cmd_alloc(h);
 	setup_ioaccel2_abort_cmd(c, h, abort, reply_queue);
 	c2 = &h->ioaccel2_cmd_pool[c->cmdindex];
-	(void) __hpsa_scsi_do_simple_cmd_core(h, c, reply_queue, NO_TIMEOUT);
+	(void) hpsa_scsi_do_simple_cmd(h, c, reply_queue, NO_TIMEOUT);
 	hpsa_get_tag(h, abort, &taglower, &tagupper);
 	dev_dbg(&h->pdev->dev,
-		"%s: Tag:0x%08x:%08x: do_simple_cmd_core completed.\n",
+		"%s: Tag:0x%08x:%08x: do_simple_cmd(ioaccel2 abort) completed.\n",
 		__func__, tagupper, taglower);
 	/* no unmap needed here because no data xfer. */
 
