@@ -7918,6 +7918,83 @@ static void hpsa_monitor_ctlr_worker(struct work_struct *work)
 	hpsa_requeue_worker(h, &h->monitor_ctlr_work);
 }
 
+static void check_board_id_tables(void)
+{
+	int i, j, found;
+	uint32_t board_id;
+	int count;
+
+	for (i = 0; i < ARRAY_SIZE(products); i++) {
+		board_id = products[i].board_id;
+		if (board_id == 0xFFFF103C) /* sentinel entry */
+			continue;
+		found = 0;
+		count = 0;
+		for (j = 0; j < ARRAY_SIZE(hpsa_pci_device_id); j++) {
+			uint32_t bid;
+
+			bid = (hpsa_pci_device_id[j].subdevice << 16) |
+				hpsa_pci_device_id[j].subvendor;
+			if (bid == board_id) {
+				found = 1;
+				if (i != j) {
+					printk(KERN_WARNING HPSA
+						": products[%d] (%s) found at pci table entry %d\n",
+						i, products[i].product_name, j);
+				}
+				count++;
+			}
+		}
+		if (!found)
+			printk(KERN_WARNING HPSA
+				": products[%d] (%s) not found in pci table\n",
+				i, products[i].product_name);
+		if (count > 1)
+			printk(KERN_WARNING HPSA
+				": products[%d] (%s) has duplicate entries in pci table\n",
+				i, products[i].product_name);
+	}
+
+	for (i = 0; i < ARRAY_SIZE(hpsa_pci_device_id); i++) {
+		board_id = (hpsa_pci_device_id[i].subdevice << 16) |
+			hpsa_pci_device_id[i].subvendor;
+		if (hpsa_pci_device_id[i].vendor == 0) /* sentinel */
+			continue;
+		if (hpsa_pci_device_id[i].subvendor == PCI_ANY_ID &&
+			hpsa_pci_device_id[i].subdevice == PCI_ANY_ID)
+			continue;
+		count = 0;
+		found = 0;
+		for (j = 0; j < ARRAY_SIZE(products); j++) {
+			if (board_id == products[j].board_id) {
+				if (j != i) {
+					printk(KERN_WARNING HPSA
+						": pci table entry %d found at product entry %d (%s)\n",
+						i, j, products[j].product_name);
+				}
+				found = 1;
+				count++;
+			}
+		}
+		if (!found)
+			printk(KERN_WARNING HPSA
+				": pci table entry %d (%04x:%04x) not found in product table\n",
+				i, hpsa_pci_device_id[i].subvendor,
+				hpsa_pci_device_id[i].subdevice);
+		if (count > 1)
+			printk(KERN_WARNING HPSA
+				": pci table entry %d (%04x:%04x) has duplicate product[] entries\n",
+				i, hpsa_pci_device_id[i].subvendor,
+				hpsa_pci_device_id[i].subdevice);
+	}
+	if (ARRAY_SIZE(products) != ARRAY_SIZE(hpsa_pci_device_id) - 1) {
+		printk(KERN_WARNING HPSA
+			": suspicious relative cardinality of products vs hpsa_pci_device_id (%lu/%lu)\n",
+			(unsigned long) ARRAY_SIZE(products),
+			(unsigned long) ARRAY_SIZE(hpsa_pci_device_id));
+	}
+}
+
 static int hpsa_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int dac, rc;
@@ -7925,6 +8002,7 @@ static int hpsa_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
 	int try_soft_reset = 0;
 	unsigned long flags;
 
+	check_board_id_tables();
 	if (number_of_controllers == 0)
 		printk(KERN_INFO DRIVER_NAME "\n");
 
