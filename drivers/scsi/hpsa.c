@@ -3021,88 +3021,23 @@ static int add_ext_target_dev(struct ctlr_info *h,
 static int hpsa_get_pdisk_of_ioaccel2(struct ctlr_info *h,
 	struct CommandList *ioaccel2_cmd_to_abort, unsigned char *scsi3addr)
 {
-	struct ReportExtendedLUNdata *physicals = NULL;
-	int responsesize = 24;	/* size of physical extended response */
-	int reportsize = sizeof(*physicals) + HPSA_MAX_PHYS_LUN * responsesize;
-	u32 nphysicals = 0;	/* number of reported physical devs */
-	int found = 0;		/* found match (1) or not (0) */
-	u32 find;		/* handle we need to match */
+	struct io_accel2_cmd *c2 =
+			&h->ioaccel2_cmd_pool[ioaccel2_cmd_to_abort->cmdindex];
+	unsigned long flags;
 	int i;
-	struct scsi_cmnd *scmd;	/* scsi command within request being aborted */
-	struct hpsa_scsi_dev_t *d; /* device of request being aborted */
-	struct io_accel2_cmd *c2a; /* ioaccel2 command to abort */
-	u32 it_nexus;		/* 4 byte device handle for the ioaccel2 cmd */
-	u32 scsi_nexus;		/* 4 byte device handle for the ioaccel2 cmd */
 
-	if (ioaccel2_cmd_to_abort->cmd_type != CMD_IOACCEL2)
-		return 0; /* no match */
-
-	/* point to the ioaccel2 device handle */
-	c2a = &h->ioaccel2_cmd_pool[ioaccel2_cmd_to_abort->cmdindex];
-	if (c2a == NULL)
-		return 0; /* no match */
-
-	scmd = (struct scsi_cmnd *) ioaccel2_cmd_to_abort->scsi_cmd;
-	if (scmd == NULL)
-		return 0; /* no match */
-
-	d = scmd->device->hostdata;
-	if (d == NULL)
-		return 0; /* no match */
-
-	it_nexus = cpu_to_le32((u32) d->ioaccel_handle);
-	scsi_nexus = cpu_to_le32((u32) c2a->scsi_nexus);
-	find = c2a->scsi_nexus;
-
-	if (h->raid_offload_debug > 0)
-		dev_info(&h->pdev->dev,
-			"%s: scsi_nexus:0x%08x device id: 0x%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
-			__func__, scsi_nexus,
-			d->device_id[0], d->device_id[1], d->device_id[2],
-			d->device_id[3], d->device_id[4], d->device_id[5],
-			d->device_id[6], d->device_id[7], d->device_id[8],
-			d->device_id[9], d->device_id[10], d->device_id[11],
-			d->device_id[12], d->device_id[13], d->device_id[14],
-			d->device_id[15]);
-
-	/* Get the list of physical devices */
-	physicals = kzalloc(reportsize, GFP_KERNEL);
-	if (physicals == NULL)
-		return 0;
-	if (hpsa_scsi_do_report_phys_luns(h, physicals, reportsize)) {
-		dev_err(&h->pdev->dev,
-			"Can't lookup %s device handle: report physical LUNs failed.\n",
-			"HP SSD Smart Path");
-		kfree(physicals);
-		return 0;
-	}
-	nphysicals = be32_to_cpu(*((__be32 *)physicals->LUNListLength)) /
-							responsesize;
-
-	/* find ioaccel2 handle in list of physicals: */
-	for (i = 0; i < nphysicals; i++) {
-		struct ext_report_lun_entry *entry = &physicals->LUN[i];
-
-		/* handle is in bytes 28-31 of each lun */
-		if (entry->ioaccel_handle != find)
-			continue; /* didn't match */
-		found = 1;
-		memcpy(scsi3addr, entry->lunid, 8);
-		if (h->raid_offload_debug > 0)
-			dev_info(&h->pdev->dev,
-				"%s: Searched h=0x%08x, Found h=0x%08x, scsiaddr 0x%8phN\n",
-				__func__, find,
-				entry->ioaccel_handle, scsi3addr);
-		break; /* found it */
-	}
-
-	kfree(physicals);
-	if (found)
-		return 1;
-	else
-		return 0;
-
+	spin_lock_irqsave(&h->devlock, flags);
+	for (i = 0; i < h->ndevices; i++)
+		if (h->dev[i]->ioaccel_handle == c2->scsi_nexus) {
+			memcpy(scsi3addr, h->dev[i]->scsi3addr,
+				sizeof(h->dev[i]->scsi3addr));
+			spin_unlock_irqrestore(&h->devlock, flags);
+			return 1;
+		}
+	spin_unlock_irqrestore(&h->devlock, flags);
+	return 0;
 }
+
 /*
  * Do CISS_REPORT_PHYS and CISS_REPORT_LOG.  Data is returned in physdev,
  * logdev.  The number of luns in physdev and logdev are returned in
