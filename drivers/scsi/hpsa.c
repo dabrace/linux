@@ -4640,6 +4640,7 @@ static void hpsa_preinitialize_commands(struct ctlr_info *h)
 	for (i = 0; i < h->nr_cmds; i++) {
 		struct CommandList *c = h->cmd_pool + i;
 		hpsa_cmd_init(h, i, c);
+		atomic_set(&c->refcount, 0);
 	}
 }
 
