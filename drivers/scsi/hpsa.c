@@ -2164,6 +2164,16 @@ static void hpsa_set_scsi_cmd_aborted(struct scsi_cmnd *cmd)
 	cmd->result = DID_ABORT << 16;
 }
 
+static void hpsa_cmd_abort_and_free(struct ctlr_info *h, struct CommandList *c,
+				    struct scsi_cmnd *cmd)
+{
+	hpsa_set_scsi_cmd_aborted(cmd);
+	dev_warn(&h->pdev->dev, "CDB %16phN was aborted with status 0x%x\n",
+			 c->Request.CDB, c->err_info->ScsiStatus);
+	c->scsi_cmd = NULL;
+	cmd_free(h, c);		/* FIX-ME:  change to cmd_tagged_free(h, c) */
+}
+
 static void process_ioaccel2_completion(struct ctlr_info *h,
 		struct CommandList *c, struct scsi_cmnd *cmd,
 		struct hpsa_scsi_dev_t *dev)
@@ -2178,10 +2188,8 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 		return hpsa_cmd_free_and_done(h, c, cmd);
 
 	/* don't requeue a command which is being aborted */
-	if (unlikely(c->abort_pending)) {
-		hpsa_set_scsi_cmd_aborted(cmd);
-		return hpsa_cmd_free_and_done(h, c, cmd);
-	}
+	if (unlikely(c->abort_pending))
+		return hpsa_cmd_abort_and_free(h, c, cmd);
 
 	/* Any RAID offload error results in retry which will use
 	 * the normal I/O path so the controller can handle whatever's
@@ -2395,10 +2403,8 @@ static void complete_scsi_command(struct CommandList *cp)
 			cp->Request.CDB);
 		break;
 	case CMD_ABORTED:
-		hpsa_set_scsi_cmd_aborted(cmd);
-		dev_warn(&h->pdev->dev, "CDB %16phN was aborted with status 0x%x\n",
-				cp->Request.CDB, ei->ScsiStatus);
-		break;
+		/* Return now to avoid calling scsi_done(). */
+		return hpsa_cmd_abort_and_free(h, cp, cmd);
 	case CMD_ABORT_FAILED:
 		cmd->result = DID_ERROR << 16;
 		dev_warn(&h->pdev->dev, "CDB %16phN : abort failed\n",
@@ -4748,10 +4754,8 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 		cmd->result = DID_NO_CONNECT << 16;
 		return hpsa_cmd_free_and_done(c->h, c, cmd);
 	}
-	if (c->abort_pending) {
-		hpsa_set_scsi_cmd_aborted(cmd);
-		return hpsa_cmd_free_and_done(c->h, c, cmd);
-	}
+	if (c->abort_pending)
+		return hpsa_cmd_abort_and_free(c->h, c, cmd);
 	if (c->cmd_type == CMD_IOACCEL2) {
 		struct ctlr_info *h = c->h;
 		struct io_accel2_cmd *c2 = &h->ioaccel2_cmd_pool[c->cmdindex];
