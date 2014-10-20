@@ -2191,6 +2191,18 @@ static void complete_scsi_command(struct CommandList *cp)
 	cmd->result = (DID_OK << 16); 		/* host byte */
 	cmd->result |= (COMMAND_COMPLETE << 8);	/* msg byte */
 
+	/* We check for lockup status here as it may be set for
+	 * CMD_SCSI, CMD_IOACCEL1 and CMD_IOACCEL2 commands by
+	 * fail_all_oustanding_cmds()
+	 */
+	if (unlikely(ei->CommandStatus == CMD_CTLR_LOCKUP)) {
+		/* DID_NO_CONNECT will prevent a retry */
+		cmd->result = DID_NO_CONNECT << 16;
+		cmd_free(h, cp);
+		cmd->scsi_done(cmd);
+		return;
+	}
+
 	if (cp->cmd_type == CMD_IOACCEL2)
 		return process_ioaccel2_completion(h, cp, cmd, dev);
 
@@ -2459,9 +2471,8 @@ static u32 lockup_detected(struct ctlr_info *h)
 static int hpsa_scsi_do_simple_cmd_core_if_no_lockup(struct ctlr_info *h,
 	struct CommandList *c, unsigned long timeout_msecs)
 {
-	/* If controller lockup detected, fake a hardware error. */
 	if (unlikely(lockup_detected(h))) {
-		c->err_info->CommandStatus = CMD_HARDWARE_ERR;
+		c->err_info->CommandStatus = CMD_CTLR_LOCKUP;
 		return 0;
 	}
 	return hpsa_scsi_do_simple_cmd_core(h, c, timeout_msecs);
@@ -4733,14 +4744,14 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 	memcpy(scsi3addr, dev->scsi3addr, sizeof(scsi3addr));
 
 	if (unlikely(lockup_detected(h))) {
-		cmd->result = DID_ERROR << 16;
+		cmd->result = DID_NO_CONNECT << 16;
 		cmd->scsi_done(cmd);
 		return 0;
 	}
 	c = cmd_alloc(h);
 
 	if (unlikely(lockup_detected(h))) {
-		cmd->result = DID_ERROR << 16;
+		cmd->result = DID_NO_CONNECT << 16;
 		cmd_free(h, c);
 		cmd->scsi_done(cmd);
 		return 0;
@@ -7243,18 +7254,25 @@ static void fail_all_outstanding_cmds(struct ctlr_info *h)
 {
 	int i, refcount;
 	struct CommandList *c;
+	int failcount = 0;
 
 	flush_workqueue(h->resubmit_wq); /* ensure all cmds are fully built */
 	for (i = 0; i < h->nr_cmds; i++) {
 		c = h->cmd_pool + i;
 		refcount = atomic_inc_return(&c->refcount);
 		if (refcount > 1) {
-			c->err_info->CommandStatus = CMD_HARDWARE_ERR;
+			c->err_info->CommandStatus = CMD_CTLR_LOCKUP;
+			/* CMD_CTLR_LOCKUP gets finish_cmd to return
+			 * DID_NO_CONNECT which doesn't get retried
+			 */
 			finish_cmd(c);
 			atomic_dec(&h->commands_outstanding);
+			failcount++;
 		}
 		cmd_free(h, c);
 	}
+	dev_warn(&h->pdev->dev,
+		"failed %d commands in fail_all\n", failcount);
 }
 
 static void set_lockup_detected_for_all_cpus(struct ctlr_info *h, u32 value)
@@ -7282,13 +7300,14 @@ static void controller_lockup_detected(struct ctlr_info *h)
 	if (!lockup_detected) {
 		/* no heartbeat, but controller gave us a zero. */
 		dev_warn(&h->pdev->dev,
-			"lockup detected but scratchpad register is zero\n");
+			"lockup detected after %d but scratchpad register is zero\n",
+			h->heartbeat_sample_interval / HZ);
 		lockup_detected = 0xffffffff;
 	}
 	set_lockup_detected_for_all_cpus(h, lockup_detected);
 	spin_unlock_irqrestore(&h->lock, flags);
-	dev_warn(&h->pdev->dev, "Controller lockup detected: 0x%08x\n",
-			lockup_detected);
+	dev_warn(&h->pdev->dev, "Controller lockup detected: 0x%08x after %d\n",
+			lockup_detected, h->heartbeat_sample_interval / HZ);
 	pci_disable_device(h->pdev);
 	fail_all_outstanding_cmds(h);
 }
