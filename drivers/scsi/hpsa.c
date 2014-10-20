@@ -1572,6 +1572,15 @@ static void hpsa_update_log_drive_phys_drive_ptrs(struct ctlr_info *h,
 			continue;
 		if (!is_logical_dev_addr_mode(dev[i]->scsi3addr))
 			continue;
+
+		/* If offload is currently enabled, the RAID map and
+		 * phys_disk[] assignment *better* not be changing
+		 * and since it isn't changing, we do not need to
+		 * update it.
+		 */
+		if (dev[i]->offload_enabled)
+			continue;
+
 		hpsa_figure_phys_disk_ptrs(h, dev, ndevices, dev[i]);
 	}
 }
