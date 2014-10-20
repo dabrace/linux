@@ -228,6 +228,8 @@ static void check_ioctl_unit_attention(struct ctlr_info *h,
 static void calc_bucket_map(int *bucket, int num_buckets,
 	int nsgs, int min_blocks, int *bucket_map);
 static void hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h);
+static void hpsa_free_ioaccel1_cmd_and_bft(struct ctlr_info *h);
+static void hpsa_free_ioaccel2_cmd_and_bft(struct ctlr_info *h);
 static inline u32 next_command(struct ctlr_info *h, u8 q);
 static int hpsa_find_cfg_addrs(struct pci_dev *pdev, void __iomem *vaddr,
 			       u32 *cfg_base_addr, u64 *cfg_base_addr_index,
@@ -7048,6 +7050,20 @@ out_disable:
 	return rc;
 }
 
+static void hpsa_free_cmd_pool(struct ctlr_info *h)
+{
+	kfree(h->cmd_pool_bits);
+	if (h->cmd_pool)
+		pci_free_consistent(h->pdev,
+			    h->nr_cmds * sizeof(struct CommandList),
+			    h->cmd_pool, h->cmd_pool_dhandle);
+	if (h->errinfo_pool)
+		pci_free_consistent(h->pdev,
+			    h->nr_cmds * sizeof(struct ErrorInfo),
+			    h->errinfo_pool,
+			    h->errinfo_pool_dhandle);
+}
+
 static int hpsa_alloc_cmd_pool(struct ctlr_info *h)
 {
 	h->cmd_pool_bits = kzalloc(
@@ -7067,28 +7083,6 @@ static int hpsa_alloc_cmd_pool(struct ctlr_info *h)
 	}
 	hpsa_preinitialize_commands(h);
 	return 0;
-}
-
-static void hpsa_free_cmd_pool(struct ctlr_info *h)
-{
-	kfree(h->cmd_pool_bits);
-	if (h->cmd_pool)
-		pci_free_consistent(h->pdev,
-			    h->nr_cmds * sizeof(struct CommandList),
-			    h->cmd_pool, h->cmd_pool_dhandle);
-	if (h->ioaccel2_cmd_pool)
-		pci_free_consistent(h->pdev,
-			h->nr_cmds * sizeof(*h->ioaccel2_cmd_pool),
-			h->ioaccel2_cmd_pool, h->ioaccel2_cmd_pool_dhandle);
-	if (h->errinfo_pool)
-		pci_free_consistent(h->pdev,
-			    h->nr_cmds * sizeof(struct ErrorInfo),
-			    h->errinfo_pool,
-			    h->errinfo_pool_dhandle);
-	if (h->ioaccel_cmd_pool)
-		pci_free_consistent(h->pdev,
-			h->nr_cmds * sizeof(struct io_accel1_cmd),
-			h->ioaccel_cmd_pool, h->ioaccel_cmd_pool_dhandle);
 }
 
 static void hpsa_irq_affinity_hints(struct ctlr_info *h)
@@ -7203,9 +7197,10 @@ static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 	hpsa_free_sg_chain_blocks(h);
 	hpsa_free_ioaccel2_sg_chain_blocks(h);
 	hpsa_free_cmd_pool(h);
-	kfree(h->ioaccel1_blockFetchTable);
-	kfree(h->blockFetchTable);
-	hpsa_free_reply_queues(h);
+	kfree(h->blockFetchTable);		/* perf 2 */
+	hpsa_free_reply_queues(h);		/* perf 1 */
+	hpsa_free_ioaccel1_cmd_and_bft(h);	/* perf 1 */
+	hpsa_free_ioaccel2_cmd_and_bft(h);	/* perf 1 */
 	hpsa_free_cfgtables(h);			/* pci_init 4 */
 	iounmap(h->vaddr);			/* pci_init 3 */
 	hpsa_disable_interrupt_mode(h);		/* pci_init 2 */
@@ -7616,6 +7611,8 @@ reinit_after_soft_reset:
 clean4:
 	hpsa_free_sg_chain_blocks(h);
 	hpsa_free_cmd_pool(h);
+	hpsa_free_ioaccel1_cmd_and_bft(h);
+	hpsa_free_ioaccel2_cmd_and_bft(h);
 clean2_and_free_irqs:
 	hpsa_free_irqs(h);
 clean2:
@@ -7710,17 +7707,11 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	hpsa_free_device_info(h);
 	hpsa_free_sg_chain_blocks(h);
 	hpsa_free_ioaccel2_sg_chain_blocks(h);
-	pci_free_consistent(h->pdev,
-		h->nr_cmds * sizeof(struct CommandList),
-		h->cmd_pool, h->cmd_pool_dhandle);
-	pci_free_consistent(h->pdev,
-		h->nr_cmds * sizeof(struct ErrorInfo),
-		h->errinfo_pool, h->errinfo_pool_dhandle);
-	hpsa_free_reply_queues(h);
-	kfree(h->cmd_pool_bits);
-	kfree(h->blockFetchTable);
-	kfree(h->ioaccel1_blockFetchTable);
-	kfree(h->ioaccel2_blockFetchTable);
+	kfree(h->blockFetchTable);		/* perf 2 */
+	hpsa_free_reply_queues(h);		/* perf 1 */
+	hpsa_free_ioaccel1_cmd_and_bft(h);	/* perf 1 */
+	hpsa_free_ioaccel2_cmd_and_bft(h);	/* perf 1 */
+	hpsa_free_cmd_pool(h);			/* init_one 5 */
 	kfree(h->hba_inquiry_data);
 
 	/* includes hpsa_disable_interrupt_mode - pci_init 2 */
@@ -7967,6 +7958,16 @@ static int hpsa_enter_performant_mode(struct ctlr_info *h, u32 trans_support)
 	return 0;
 }
 
+/* Free ioaccel1 mode command blocks and block fetch table */
+static void hpsa_free_ioaccel1_cmd_and_bft(struct ctlr_info *h)
+{
+	if (h->ioaccel_cmd_pool)
+		pci_free_consistent(h->pdev,
+			h->nr_cmds * sizeof(*h->ioaccel_cmd_pool),
+			h->ioaccel_cmd_pool, h->ioaccel_cmd_pool_dhandle);
+	kfree(h->ioaccel1_blockFetchTable);
+}
+
 /* Allocate ioaccel1 mode command blocks and block fetch table */
 static int hpsa_alloc_ioaccel1_cmd_and_bft(struct ctlr_info *h)
 {
@@ -7999,12 +8000,18 @@ static int hpsa_alloc_ioaccel1_cmd_and_bft(struct ctlr_info *h)
 	return 0;
 
 clean_up:
-	if (h->ioaccel_cmd_pool)
-		pci_free_consistent(h->pdev,
-			h->nr_cmds * sizeof(*h->ioaccel_cmd_pool),
-			h->ioaccel_cmd_pool, h->ioaccel_cmd_pool_dhandle);
-	kfree(h->ioaccel1_blockFetchTable);
+	hpsa_free_ioaccel1_cmd_and_bft(h);
 	return -ENOMEM;
+}
+
+/* Free ioaccel2 mode command blocks and block fetch table */
+static void hpsa_free_ioaccel2_cmd_and_bft(struct ctlr_info *h)
+{
+	if (h->ioaccel2_cmd_pool)
+		pci_free_consistent(h->pdev,
+			h->nr_cmds * sizeof(*h->ioaccel2_cmd_pool),
+			h->ioaccel2_cmd_pool, h->ioaccel2_cmd_pool_dhandle);
+	kfree(h->ioaccel2_blockFetchTable);
 }
 
 /* Allocate ioaccel2 mode command blocks and block fetch table */
@@ -8040,11 +8047,7 @@ static int hpsa_alloc_ioaccel2_cmd_and_bft(struct ctlr_info *h)
 	return 0;
 
 clean_up:
-	if (h->ioaccel2_cmd_pool)
-		pci_free_consistent(h->pdev,
-			h->nr_cmds * sizeof(*h->ioaccel2_cmd_pool),
-			h->ioaccel2_cmd_pool, h->ioaccel2_cmd_pool_dhandle);
-	kfree(h->ioaccel2_blockFetchTable);
+	hpsa_free_ioaccel2_cmd_and_bft(h);
 	return -ENOMEM;
 }
 
