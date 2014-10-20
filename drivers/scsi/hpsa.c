@@ -216,6 +216,7 @@ static int hpsa_change_queue_depth(struct scsi_device *sdev,
 static int hpsa_eh_device_reset_handler(struct scsi_cmnd *scsicmd);
 static int hpsa_eh_abort_handler(struct scsi_cmnd *scsicmd);
 static int hpsa_slave_alloc(struct scsi_device *sdev);
+static int hpsa_slave_configure(struct scsi_device *sdev);
 static void hpsa_slave_destroy(struct scsi_device *sdev);
 
 static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno);
@@ -807,6 +808,7 @@ static struct scsi_host_template hpsa_driver_template = {
 	.eh_device_reset_handler = hpsa_eh_device_reset_handler,
 	.ioctl			= hpsa_ioctl,
 	.slave_alloc		= hpsa_slave_alloc,
+	.slave_configure	= hpsa_slave_configure,
 	.slave_destroy		= hpsa_slave_destroy,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl		= hpsa_compat_ioctl,
@@ -1519,20 +1521,23 @@ static void adjust_hpsa_scsi_table(struct ctlr_info *h, int hostno,
 	sh = h->scsi_host;
 	/* Notify scsi mid layer of any removed devices */
 	for (i = 0; i < nremoved; i++) {
-		struct scsi_device *sdev =
-			scsi_device_lookup(sh, removed[i]->bus,
-				removed[i]->target, removed[i]->lun);
-		if (sdev != NULL) {
-			scsi_remove_device(sdev);
-			scsi_device_put(sdev);
-		} else {
-			/* We don't expect to get here.
-			 * future cmds to this device will get selection
-			 * timeout as if the device was gone.
-			 */
-			dev_warn(&h->pdev->dev, "didn't find c%db%dt%dl%d "
-				" for removal.", hostno, removed[i]->bus,
-				removed[i]->target, removed[i]->lun);
+		if (removed[i]->expose_state & HPSA_SCSI_ADD) {
+			struct scsi_device *sdev =
+				scsi_device_lookup(sh, removed[i]->bus,
+					removed[i]->target, removed[i]->lun);
+			if (sdev != NULL) {
+				scsi_remove_device(sdev);
+				scsi_device_put(sdev);
+			} else {
+				/* We don't expect to get here.
+				 * future cmds to this device will get selection
+				 * timeout as if the device was gone.
+				 */
+				dev_warn(&h->pdev->dev,
+					"didn't find c%db%dt%dl%d for removal.",
+					hostno, removed[i]->bus,
+					removed[i]->target, removed[i]->lun);
+			}
 		}
 		kfree(removed[i]);
 		removed[i] = NULL;
@@ -1540,6 +1545,8 @@ static void adjust_hpsa_scsi_table(struct ctlr_info *h, int hostno,
 
 	/* Notify scsi mid layer of any added devices */
 	for (i = 0; i < nadded; i++) {
+		if (!(added[i]->expose_state & HPSA_SCSI_ADD))
+			continue;
 		if (scsi_add_device(sh, added[i]->bus,
 			added[i]->target, added[i]->lun) == 0)
 			continue;
@@ -1588,6 +1595,23 @@ static int hpsa_slave_alloc(struct scsi_device *sdev)
 		sdev_id(sdev), sdev->lun);
 	if (sd != NULL)
 		sdev->hostdata = sd;
+	spin_unlock_irqrestore(&h->devlock, flags);
+	return 0;
+}
+
+/* configure scsi device based on internal per-device structure */
+static int hpsa_slave_configure(struct scsi_device *sdev)
+{
+	struct hpsa_scsi_dev_t *sd;
+	unsigned long flags;
+	struct ctlr_info *h;
+
+	h = sdev_to_hba(sdev);
+	spin_lock_irqsave(&h->devlock, flags);
+	sd = sdev->hostdata;
+	if (sd && sd->expose_state & HPSA_NO_ULD_ATTACH)
+		sdev->no_uld_attach = 1;
+
 	spin_unlock_irqrestore(&h->devlock, flags);
 	return 0;
 }
@@ -3258,10 +3282,12 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 		/* Figure out where the LUN ID info is coming from */
 		lunaddrbytes = figure_lunaddrbytes(h, raid_ctlr_position,
 			i, nphysicals, nlogicals, physdev_list, logdev_list);
-		/* skip masked physical devices. */
-		if (lunaddrbytes[3] & 0xC0 &&
-			i < nphysicals + (raid_ctlr_position == 0))
-			continue;
+
+		/* skip masked non-disk devices */
+		if (MASKED_DEVICE(lunaddrbytes))
+			if (i < nphysicals + (raid_ctlr_position == 0) &&
+				NON_DISK_PHYS_DEV(lunaddrbytes))
+				continue;
 
 		/* Get device type, vendor, model, device id */
 		if (hpsa_update_device_info(h, lunaddrbytes, tmpdevice,
@@ -3285,6 +3311,17 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 		}
 
 		*this_device = *tmpdevice;
+
+		/* do not expose masked devices */
+		if (MASKED_DEVICE(lunaddrbytes) &&
+			i < nphysicals + (raid_ctlr_position == 0)) {
+			if (h->hba_mode_enabled)
+				dev_warn(&h->pdev->dev,
+					"Masked physical device detected\n");
+			this_device->expose_state = HPSA_DO_NOT_EXPOSE;
+		} else {
+			this_device->expose_state = HPSA_EXPOSE;
+		}
 
 		switch (this_device->devtype) {
 		case TYPE_ROM:
@@ -3326,6 +3363,10 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 		case TYPE_TAPE:
 		case TYPE_MEDIUM_CHANGER:
 			ncurrent++;
+			break;
+		case TYPE_ENCLOSURE:
+			if (h->hba_mode_enabled)
+				ncurrent++;
 			break;
 		case TYPE_RAID:
 			/* Only present the Smartarray HBA as a RAID controller.

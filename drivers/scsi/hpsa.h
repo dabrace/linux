@@ -54,6 +54,11 @@ struct hpsa_scsi_dev_t {
 					 */
 	struct raid_map_data raid_map;	/* I/O accelerator RAID map */
 	int supports_aborts;
+#define HPSA_NO_ULD_ATTACH	0x1
+#define HPSA_DO_NOT_EXPOSE	0x2
+#define HPSA_EXPOSE		0x4
+#define HPSA_SCSI_ADD		(HPSA_NO_ULD_ATTACH | HPSA_EXPOSE)
+	u8 expose_state;
 };
 
 struct reply_queue_buffer {
