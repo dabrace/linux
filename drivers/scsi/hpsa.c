@@ -5703,6 +5703,14 @@ static int hpsa_get_cmd_index(struct scsi_cmnd *scmd)
 	return idx;
 }
 
+static void print_scsi_cmd(struct ctlr_info *h, struct scsi_cmnd *scmd, int idx)
+{
+	char format[50];
+
+	sprintf(format, "Tag %d: CDB: %dph\n", idx, scmd->cmd_len);
+	dev_warn(&h->pdev->dev, format, scmd->cmnd);
+}
+
 /*
  * For operations with an associated SCSI command, a command block is allocated
  * at init, and managed by cmd_tagged_alloc() and cmd_tagged_free() using the
@@ -5737,6 +5745,7 @@ static struct CommandList *cmd_tagged_alloc(struct ctlr_info *h,
 		dev_warn(&h->pdev->dev,
 			"tag collision (tag=%d) in cmd_tagged_alloc().\n",
 			idx);
+		print_scsi_cmd(h, scmd, idx);
 	}
 
 	hpsa_cmd_partial_init(h, idx, c);
