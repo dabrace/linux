@@ -5614,7 +5614,8 @@ static struct CommandList *cmd_tagged_alloc(struct ctlr_info *h,
 
 	if (idx < h->reserved_cmds || idx > h->nr_cmds) {
 		dev_err(&h->pdev->dev, "Bad block tag: %d\n", idx);
-		return NULL;
+		/* This value comes from the block layer...it's not our bug. */
+		BUG_ON(idx < HPSA_NRESERVED_CMDS || idx > h->nr_cmds);
 	}
 
 	refcount = atomic_inc_return(&c->refcount);
