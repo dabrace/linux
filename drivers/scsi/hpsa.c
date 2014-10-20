@@ -5090,18 +5090,23 @@ static int hpsa_register_scsi(struct ctlr_info *h)
 	sh->unique_id = sh->irq;
 	if (!shost_use_blk_mq(sh)) {
 		error = scsi_init_shared_tag_map(sh, sh->can_queue);
-		if (error)
+		if (error) {
+			dev_err(&h->pdev->dev,
+				"%s: scs_init_shared_tag_map failed for controller %d\n",
+				__func__, h->ctlr);
 			goto fail_host_put;
+		}
 	}
 	error = scsi_add_host(sh, &h->pdev->dev);
-	if (error)
+	if (error) {
+		dev_err(&h->pdev->dev, "%s: scsi_add_host failed for controller %d\n",
+			__func__, h->ctlr);
 		goto fail_host_put;
+	}
 	scsi_scan_host(sh);
 	return 0;
 
  fail_host_put:
-	dev_err(&h->pdev->dev, "%s: scsi_add_host"
-		" failed for controller %d\n", __func__, h->ctlr);
 	scsi_host_put(sh);
 	return error;
  fail:
