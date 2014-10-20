@@ -245,6 +245,7 @@ static void hpsa_flush_cache(struct ctlr_info *h);
 static int hpsa_scsi_ioaccel_queue_command(struct ctlr_info *h,
 	struct CommandList *c, u32 ioaccel_handle, u8 *cdb, int cdb_len,
 	u8 *scsi3addr);
+static void hpsa_command_resubmit_worker(struct work_struct *work);
 
 static inline struct ctlr_info *sdev_to_hba(struct scsi_device *sdev)
 {
@@ -1647,7 +1648,6 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 		struct hpsa_scsi_dev_t *dev)
 {
 	struct io_accel2_cmd *c2 = &h->ioaccel2_cmd_pool[c->cmdindex];
-	int raid_retry = 0;
 
 	/* check for good status */
 	if (likely(c2->error_data.serv_response == 0 &&
@@ -1664,24 +1664,22 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 	if (is_logical_dev_addr_mode(dev->scsi3addr) &&
 		c2->error_data.serv_response ==
 			IOACCEL2_SERV_RESPONSE_FAILURE) {
-		dev->offload_enabled = 0;
-		cmd->result = DID_SOFT_ERROR << 16;
-		cmd_free(h, c);
-		cmd->scsi_done(cmd);
-		return;
+		if (c2->error_data.status ==
+			IOACCEL2_STATUS_SR_IOACCEL_DISABLED)
+			dev->offload_enabled = 0;
+		goto retry_cmd;
 	}
-	raid_retry = handle_ioaccel_mode2_error(h, c, cmd, c2);
-	/* If error found, disable Smart Path,
-	 * force a retry on the standard path.
-	 */
-	if (raid_retry) {
-		dev_warn(&h->pdev->dev, "%s: Retrying on standard path.\n",
-			"HP SSD Smart Path");
-		dev->offload_enabled = 0; /* Disable Smart Path */
-		cmd->result = DID_SOFT_ERROR << 16;
-	}
+
+	if (handle_ioaccel_mode2_error(h, c, cmd, c2))
+		goto retry_cmd;
+
 	cmd_free(h, c);
 	cmd->scsi_done(cmd);
+	return;
+
+retry_cmd:
+	INIT_WORK(&c->work, hpsa_command_resubmit_worker);
+	schedule_work_on(raw_smp_processor_id(), &c->work);
 }
 
 static void complete_scsi_command(struct CommandList *cp)
@@ -1749,9 +1747,8 @@ static void complete_scsi_command(struct CommandList *cp)
 		if (is_logical_dev_addr_mode(dev->scsi3addr)) {
 			if (ei->CommandStatus == CMD_IOACCEL_DISABLED)
 				dev->offload_enabled = 0;
-			cmd->result = DID_SOFT_ERROR << 16;
-			cmd_free(h, cp);
-			cmd->scsi_done(cmd);
+			INIT_WORK(&cp->work, hpsa_command_resubmit_worker);
+			schedule_work_on(raw_smp_processor_id(), &cp->work);
 			return;
 		}
 	}
@@ -3952,6 +3949,31 @@ static int hpsa_ciss_submit(struct ctlr_info *h,
 	enqueue_cmd_and_start_io(h, c);
 	/* the cmd'll come back via intr handler in complete_scsi_command()  */
 	return 0;
+}
+
+static void hpsa_command_resubmit_worker(struct work_struct *work)
+{
+	struct scsi_cmnd *cmd;
+	struct hpsa_scsi_dev_t *dev;
+	struct CommandList *c =
+			container_of(work, struct CommandList, work);
+
+	cmd = c->scsi_cmd;
+	dev = cmd->device->hostdata;
+	if (!dev) {
+		cmd->result = DID_NO_CONNECT << 16;
+		cmd->scsi_done(cmd);
+		return;
+	}
+	if (hpsa_ciss_submit(c->h, c, cmd, dev->scsi3addr)) {
+		/*
+		 * If we get here, it means dma mapping failed. Try
+		 * again via scsi mid layer, which will then get
+		 * SCSI_MLQUEUE_HOST_BUSY.
+		 */
+		cmd->result = DID_IMM_RETRY << 16;
+		cmd->scsi_done(cmd);
+	}
 }
 
 /* Running in struct Scsi_Host->host_lock less mode */
