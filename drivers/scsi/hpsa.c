@@ -5004,6 +5004,38 @@ static int hpsa_register_scsi(struct ctlr_info *h)
 	return -ENOMEM;
 }
 
+/* Send a TEST_UNIT_READY command to the specified LUN using the specified
+ * reply queue; returns zero if the unit is ready, and non-zero otherwise. */
+static int hpsa_send_test_unit_ready(struct ctlr_info *h,
+				struct CommandList *c, unsigned char lunaddr[],
+				int reply_queue)
+{
+	int rc;
+
+	/* Send the Test Unit Ready, fill_cmd can't fail, no mapping */
+	(void) fill_cmd(c, TEST_UNIT_READY, h,
+			NULL, 0, 0, lunaddr, TYPE_CMD);
+	rc = __hpsa_scsi_do_simple_cmd_core(h, c, reply_queue, NO_TIMEOUT);
+	if (rc)
+		return rc;
+	/* no unmap needed here because no data xfer. */
+
+	/* Check if the unit is already ready. */
+	if (c->err_info->CommandStatus == CMD_SUCCESS)
+		return 0;
+
+	/* The first command sent after reset will receive "unit attention" to
+	 * indicate that the LUN has been reset...this is actually what we're
+	 * looking for (but, success is good too). */
+	if (c->err_info->CommandStatus == CMD_TARGET_STATUS &&
+		c->err_info->ScsiStatus == SAM_STAT_CHECK_CONDITION &&
+			(c->err_info->SenseInfo[2] == NO_SENSE ||
+			 c->err_info->SenseInfo[2] == UNIT_ATTENTION))
+		return 0;
+
+	return 1;
+}
+
 static int wait_for_device_to_become_ready(struct ctlr_info *h,
 	unsigned char lunaddr[])
 {
@@ -5028,26 +5060,13 @@ static int wait_for_device_to_become_ready(struct ctlr_info *h,
 		if (waittime < HPSA_MAX_WAIT_INTERVAL_SECS)
 			waittime = waittime * 2;
 
-		/* Send the Test Unit Ready, fill_cmd can't fail, no mapping */
-		(void) fill_cmd(c, TEST_UNIT_READY, h,
-				NULL, 0, 0, lunaddr, TYPE_CMD);
-		rc = hpsa_scsi_do_simple_cmd_core(h, c, NO_TIMEOUT);
-		if (rc)
-			goto do_it_again;
-		/* no unmap needed here because no data xfer. */
-
-		if (c->err_info->CommandStatus == CMD_SUCCESS)
+		rc = hpsa_send_test_unit_ready(h, c, lunaddr,
+					DEFAULT_REPLY_QUEUE);
+		if (!rc)
 			break;
 
-		if (c->err_info->CommandStatus == CMD_TARGET_STATUS &&
-			c->err_info->ScsiStatus == SAM_STAT_CHECK_CONDITION &&
-			(c->err_info->SenseInfo[2] == NO_SENSE ||
-			c->err_info->SenseInfo[2] == UNIT_ATTENTION))
-			break;
-do_it_again:
 		dev_warn(&h->pdev->dev, "waiting %d secs "
 			"for device to become ready.\n", waittime);
-		rc = 1; /* device not ready. */
 	}
 
 	if (rc)
