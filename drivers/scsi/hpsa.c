@@ -6895,6 +6895,17 @@ error:
 	return -ENODEV;
 }
 
+/* free items allocated or mapped by hpsa_pci_init */
+static void hpsa_free_pci_init(struct ctlr_info *h)
+{
+	hpsa_free_cfgtables(h);			/* pci_init 4 */
+	iounmap(h->vaddr);			/* pci_init 3 */
+	hpsa_disable_interrupt_mode(h);		/* pci_init 2 */
+	pci_release_regions(h->pdev);		/* pci_init 2 */
+	pci_disable_device(h->pdev);		/* pci_init 1 */
+}
+
+/* several items must be freed later */
 static int hpsa_pci_init(struct ctlr_info *h)
 {
 	int prod_index, err;
