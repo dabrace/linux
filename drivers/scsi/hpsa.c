@@ -4428,7 +4428,7 @@ static void hpsa_get_tag(struct ctlr_info *h,
 }
 
 static int hpsa_send_abort(struct ctlr_info *h, unsigned char *scsi3addr,
-	struct CommandList *abort, int swizzle)
+	struct CommandList *abort, int swizzle, int reply_queue)
 {
 	int rc = IO_OK;
 	struct CommandList *c;
@@ -4446,7 +4446,7 @@ static int hpsa_send_abort(struct ctlr_info *h, unsigned char *scsi3addr,
 		0, 0, scsi3addr, TYPE_MSG);
 	if (swizzle)
 		swizzle_abort_tag(&c->Request.CDB[4]);
-	hpsa_scsi_do_simple_cmd_core(h, c);
+	__hpsa_scsi_do_simple_cmd_core(h, c, reply_queue);
 	hpsa_get_tag(h, abort, &taglower, &tagupper);
 	dev_dbg(&h->pdev->dev, "%s: Tag:0x%08x:%08x: do_simple_cmd_core completed.\n",
 		__func__, tagupper, taglower);
@@ -4480,7 +4480,8 @@ static int hpsa_send_abort(struct ctlr_info *h, unsigned char *scsi3addr,
  */
 
 static int hpsa_send_reset_as_abort_ioaccel2(struct ctlr_info *h,
-	unsigned char *scsi3addr, struct CommandList *abort)
+	unsigned char *scsi3addr, struct CommandList *abort,
+	__attribute__((unused)) int reply_queue)
 {
 	int rc = IO_OK;
 	struct scsi_cmnd *scmd; /* scsi command within request being aborted */
@@ -4556,7 +4557,7 @@ static int hpsa_send_reset_as_abort_ioaccel2(struct ctlr_info *h,
  * make this true someday become false.
  */
 static int hpsa_send_abort_both_ways(struct ctlr_info *h,
-	unsigned char *scsi3addr, struct CommandList *abort)
+	unsigned char *scsi3addr, struct CommandList *abort, int reply_queue)
 {
 	/* ioccelerator mode 2 commands should be aborted via the
 	 * accelerated path, since RAID path is unaware of these commands,
@@ -4564,10 +4565,20 @@ static int hpsa_send_abort_both_ways(struct ctlr_info *h,
 	 * Change abort to physical device reset.
 	 */
 	if (abort->cmd_type == CMD_IOACCEL2)
-		return hpsa_send_reset_as_abort_ioaccel2(h, scsi3addr, abort);
+		return hpsa_send_reset_as_abort_ioaccel2(h, scsi3addr,
+							abort, reply_queue);
 
-	return hpsa_send_abort(h, scsi3addr, abort, 0) &&
-			hpsa_send_abort(h, scsi3addr, abort, 1);
+	return hpsa_send_abort(h, scsi3addr, abort, 0, reply_queue) &&
+			hpsa_send_abort(h, scsi3addr, abort, 1, reply_queue);
+}
+
+/* Find out which reply queue a command was meant to return on */
+static int hpsa_extract_reply_queue(struct ctlr_info *h,
+					struct CommandList *c)
+{
+	if (c->cmd_type == CMD_IOACCEL2)
+		return h->ioaccel2_cmd_pool[c->cmdindex].reply_queue;
+	return c->Header.ReplyQueue;
 }
 
 /* Send an abort for the specified command.
@@ -4585,7 +4596,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	char msg[256];		/* For debug messaging. */
 	int ml = 0;
 	u32 tagupper, taglower;
-	int refcount;
+	int refcount, reply_queue;
 
 	/* Find the controller of the command to be aborted */
 	h = sdev_to_hba(sc->device);
@@ -4623,6 +4634,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		return SUCCESS;
 	}
 	hpsa_get_tag(h, abort, &taglower, &tagupper);
+	reply_queue = hpsa_extract_reply_queue(h, abort);
 	ml += sprintf(msg+ml, "Tag:0x%08x:%08x ", tagupper, taglower);
 	as  = (struct scsi_cmnd *) abort->scsi_cmd;
 	if (as != NULL)
@@ -4636,7 +4648,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	 * by the firmware (but not to the scsi mid layer) but we can't
 	 * distinguish which.  Send the abort down.
 	 */
-	rc = hpsa_send_abort_both_ways(h, dev->scsi3addr, abort);
+	rc = hpsa_send_abort_both_ways(h, dev->scsi3addr, abort, reply_queue);
 	if (rc != 0) {
 		dev_dbg(&h->pdev->dev, "%s Request FAILED.\n", msg);
 		dev_warn(&h->pdev->dev, "FAILED abort on device C%d:B%d:T%d:L%d\n",
