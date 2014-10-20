@@ -1636,6 +1636,8 @@ static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
 	int i, j;
 	int nraid_map_entries = map->row_cnt * map->layout_map_count *
 		(map->data_disks_per_row + map->metadata_disks_per_row);
+	int nphys_disk = map->layout_map_count *
+		(map->data_disks_per_row + map->metadata_disks_per_row);
 	int qdepth;
 
 	if (nraid_map_entries > RAID_MAP_MAX_ENTRIES)
@@ -1655,8 +1657,9 @@ static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
 				continue;
 
 			logical_drive->phys_disk[i] = dev[j];
-			qdepth = min(h->nr_cmds, qdepth +
-				logical_drive->phys_disk[i]->queue_depth);
+			if (i < nphys_disk)
+				qdepth = min(h->nr_cmds, qdepth +
+				    logical_drive->phys_disk[i]->queue_depth);
 			break;
 		}
 
