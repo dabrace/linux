@@ -7954,7 +7954,7 @@ clean_up:
 			h->nr_cmds * sizeof(*h->ioaccel_cmd_pool),
 			h->ioaccel_cmd_pool, h->ioaccel_cmd_pool_dhandle);
 	kfree(h->ioaccel1_blockFetchTable);
-	return 1;
+	return -ENOMEM;
 }
 
 static int ioaccel2_alloc_cmds_and_bft(struct ctlr_info *h)
