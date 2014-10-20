@@ -870,6 +870,9 @@ static struct device_attribute *hpsa_shost_attrs[] = {
 	NULL,
 };
 
+#define HPSA_NRESERVED_CMDS	(HPSA_CMDS_RESERVED_FOR_ABORTS + \
+		HPSA_CMDS_RESERVED_FOR_DRIVER + HPSA_MAX_CONCURRENT_PASSTHRUS)
+
 static struct scsi_host_template hpsa_driver_template = {
 	.module			= THIS_MODULE,
 	.name			= HPSA,
@@ -894,9 +897,7 @@ static struct scsi_host_template hpsa_driver_template = {
 	.shost_attrs = hpsa_shost_attrs,
 	.max_sectors = 8192,
 	.no_write_same = 1,
-	.reserved_tags = HPSA_CMDS_RESERVED_FOR_ABORTS +
-			HPSA_CMDS_RESERVED_FOR_DRIVER +
-			HPSA_MAX_CONCURRENT_PASSTHRUS,
+	.reserved_tags = HPSA_NRESERVED_CMDS,
 };
 
 static inline u32 next_command(struct ctlr_info *h, u8 q)
@@ -5612,7 +5613,7 @@ static struct CommandList *cmd_tagged_alloc(struct ctlr_info *h,
 	struct CommandList *c = h->cmd_pool + idx;
 	int refcount = 0;
 
-	if (idx < h->reserved_cmds || idx > h->nr_cmds) {
+	if (idx < HPSA_NRESERVED_CMDS || idx > h->nr_cmds) {
 		dev_err(&h->pdev->dev, "Bad block tag: %d\n", idx);
 		/* This value comes from the block layer...it's not our bug. */
 		BUG_ON(idx < HPSA_NRESERVED_CMDS || idx > h->nr_cmds);
@@ -5680,8 +5681,8 @@ static struct CommandList *cmd_alloc(struct ctlr_info *h)
 	 */
 
 	for (;;) {
-		i = find_first_zero_bit(h->cmd_pool_bits, h->reserved_cmds);
-		if (unlikely(i >= h->reserved_cmds))
+		i = find_first_zero_bit(h->cmd_pool_bits, HPSA_NRESERVED_CMDS);
+		if (unlikely(i >= HPSA_NRESERVED_CMDS))
 			continue;
 		c = h->cmd_pool + i;
 		refcount = atomic_inc_return(&c->refcount);
@@ -7105,18 +7106,21 @@ static int hpsa_find_cfgtables(struct ctlr_info *h)
 
 static void hpsa_get_max_perf_mode_cmds(struct ctlr_info *h)
 {
+#define MIN_MAX_COMMANDS 16
+	BUILD_BUG_ON(MIN_MAX_COMMANDS <= HPSA_NRESERVED_CMDS);
+
 	h->max_commands = readl(&(h->cfgtable->MaxPerformantModeCommands));
 
 	/* Limit commands in memory limited kdump scenario. */
 	if (reset_devices && h->max_commands > 32)
 		h->max_commands = 32;
 
-	if (h->max_commands < 16) {
+	if (h->max_commands < MIN_MAX_COMMANDS) {
 		dev_warn(&h->pdev->dev, "Controller reports "
 			"max supported commands of %d, an obvious lie. "
 			"Using 16.  Ensure that firmware is up to date.\n",
 			h->max_commands);
-		h->max_commands = 16;
+		h->max_commands = MIN_MAX_COMMANDS;
 	}
 }
 
@@ -7137,7 +7141,6 @@ static void hpsa_find_board_params(struct ctlr_info *h)
 {
 	hpsa_get_max_perf_mode_cmds(h);
 	h->nr_cmds = h->max_commands;
-	h->reserved_cmds = hpsa_driver_template.reserved_tags;
 	h->maxsgentries = readl(&(h->cfgtable->MaxScatterGatherElements));
 	h->fw_support = readl(&(h->cfgtable->misc_fw_support));
 	if (hpsa_supports_chained_sg_blocks(h)) {
