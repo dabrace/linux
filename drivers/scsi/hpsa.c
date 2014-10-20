@@ -3311,6 +3311,31 @@ static int hpsa_hba_mode_enabled(struct ctlr_info *h)
 	return hba_mode_enabled;
 }
 
+/* get physical drive ioaccel handle and queue depth */
+void hpsa_get_ioaccel_drive_info(struct ctlr_info *h,
+		struct hpsa_scsi_dev_t *dev,
+		u8 *lunaddrbytes,
+		struct bmic_identify_physical_device *id_phys)
+{
+	int rc;
+	struct ext_report_lun_entry *rle =
+		(struct ext_report_lun_entry *) lunaddrbytes;
+
+	dev->ioaccel_handle = rle->ioaccel_handle;
+	memset(id_phys, 0, sizeof(*id_phys));
+	rc = hpsa_bmic_id_physical_device(h, lunaddrbytes,
+			GET_BMIC_DRIVE_NUMBER(lunaddrbytes), id_phys,
+			sizeof(*id_phys));
+	if (!rc)
+		/* Reserve space for FW operations */
+#define DRIVE_CMDS_RESERVED_FOR_FW 2
+		dev->queue_depth =
+			le16_to_cpu(id_phys->current_queue_depth_limit) -
+				DRIVE_CMDS_RESERVED_FOR_FW;
+	else
+		dev->queue_depth = 7; /* conservative */
+}
+
 static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 {
 	/* the idea here is we could get notified
@@ -3333,9 +3358,6 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 	int ncurrent = 0;
 	int i, n_ext_target_devs, ndevs_to_allocate;
 	int raid_ctlr_position;
-	u8 bmic_bus;
-	u8 bmic_lev_two_tgt;
-	u16 bmic_drive_number;
 	int rescan_hba_mode;
 	DECLARE_BITMAP(lunzerobits, MAX_EXT_TARGETS);
 
@@ -3477,28 +3499,8 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 			}
 			if (h->transMethod & CFGTBL_Trans_io_accel1 ||
 				h->transMethod & CFGTBL_Trans_io_accel2) {
-				int rc;
-
-				memcpy(&this_device->ioaccel_handle,
-					&lunaddrbytes[20],
-					sizeof(this_device->ioaccel_handle));
-				bmic_bus = lunaddrbytes[7] & 0x3F;
-				bmic_lev_two_tgt = lunaddrbytes[6];
-				bmic_drive_number = ((bmic_bus - 1) << 8) +
-							bmic_lev_two_tgt;
-
-				memset(id_phys, 0, sizeof(*id_phys));
-				rc = hpsa_bmic_id_physical_device(h, lunaddrbytes,
-						bmic_drive_number, id_phys,
-						sizeof(*id_phys));
-				if (!rc)
-					/* Reserve space for FW operations */
-#define DRIVE_CMDS_RESERVED_FOR_FW 2
-					this_device->queue_depth =
-						le16_to_cpu(id_phys->current_queue_depth_limit) -
-							DRIVE_CMDS_RESERVED_FOR_FW;
-				else
-					this_device->queue_depth = 7; /* conservative */
+				hpsa_get_ioaccel_drive_info(h, this_device,
+							lunaddrbytes, id_phys);
 				ncurrent++;
 			}
 			break;
