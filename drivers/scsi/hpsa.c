@@ -1174,7 +1174,7 @@ lun_assigned:
 	(*nadded)++;
 
 	dev_info(&h->pdev->dev,
-		"%6s scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+		"%6s scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d qd=%d\n",
 		device->expose_state & HPSA_SCSI_ADD ? "added" : "masked",
 		hostno, device->bus, device->target, device->lun,
 		scsi_device_type(device->devtype),
@@ -1184,7 +1184,8 @@ lun_assigned:
 			"RAID-?" : raid_label[device->raid_level],
 		device->offload_config ? '+' : '-',
 		device->offload_enabled ? '+' : '-',
-		device->expose_state);
+		device->expose_state,
+		device->queue_depth);
 	return 0;
 }
 
@@ -1225,9 +1226,10 @@ static void hpsa_scsi_update_entry(struct ctlr_info *h, int hostno,
 	h->dev[entry]->offload_to_be_enabled = new_entry->offload_enabled;
 	if (!new_entry->offload_enabled)
 		h->dev[entry]->offload_enabled = 0;
+	h->dev[entry]->queue_depth = new_entry->queue_depth;
 
 	dev_info(&h->pdev->dev,
-		"updated scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+		"updated scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d qd=%d\n",
 		hostno, new_entry->bus, new_entry->target, new_entry->lun,
 		scsi_device_type(new_entry->devtype),
 		new_entry->vendor,
@@ -1236,7 +1238,8 @@ static void hpsa_scsi_update_entry(struct ctlr_info *h, int hostno,
 			"RAID-?" : raid_label[new_entry->raid_level],
 		new_entry->offload_config ? '+' : '-',
 		new_entry->offload_enabled ? '+' : '-',
-		new_entry->expose_state);
+		new_entry->expose_state,
+		new_entry->queue_depth);
 }
 
 /* Replace an entry from h->dev[] array. */
@@ -1265,7 +1268,7 @@ static void hpsa_scsi_replace_entry(struct ctlr_info *h, int hostno,
 	added[*nadded] = new_entry;
 	(*nadded)++;
 	dev_info(&h->pdev->dev,
-		"replaced scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+		"replaced scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d qd=%d\n",
 		hostno, new_entry->bus, new_entry->target, new_entry->lun,
 		scsi_device_type(new_entry->devtype),
 		new_entry->vendor,
@@ -1274,7 +1277,8 @@ static void hpsa_scsi_replace_entry(struct ctlr_info *h, int hostno,
 			"RAID-?" : raid_label[new_entry->raid_level],
 		new_entry->offload_config ? '+' : '-',
 		new_entry->offload_enabled ? '+' : '-',
-		new_entry->expose_state);
+		new_entry->expose_state,
+		new_entry->queue_depth);
 }
 
 /* Remove an entry from h->dev[] array. */
@@ -1295,7 +1299,7 @@ static void hpsa_scsi_remove_entry(struct ctlr_info *h, int hostno, int entry,
 		h->dev[i] = h->dev[i+1];
 	h->ndevices--;
 	dev_info(&h->pdev->dev,
-		"removed scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+		"removed scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d qd=%d\n",
 		hostno, sd->bus, sd->target, sd->lun,
 		scsi_device_type(sd->devtype),
 		sd->vendor,
@@ -1304,7 +1308,8 @@ static void hpsa_scsi_remove_entry(struct ctlr_info *h, int hostno, int entry,
 			"RAID-?" : raid_label[sd->raid_level],
 		sd->offload_config ? '+' : '-',
 		sd->offload_enabled ? '+' : '-',
-		sd->expose_state);
+		sd->expose_state,
+		sd->queue_depth);
 }
 
 #define SCSI3ADDR_EQ(a, b) ( \
@@ -1375,6 +1380,8 @@ static inline int device_updated(struct hpsa_scsi_dev_t *dev1,
 	if (dev1->offload_config != dev2->offload_config)
 		return 1;
 	if (dev1->offload_enabled != dev2->offload_enabled)
+		return 1;
+	if (dev1->queue_depth != dev2->queue_depth)
 		return 1;
 	return 0;
 }
@@ -1537,6 +1544,7 @@ static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
 	if (nraid_map_entries > RAID_MAP_MAX_ENTRIES)
 		nraid_map_entries = RAID_MAP_MAX_ENTRIES;
 
+	logical_drive->queue_depth = 0;
 	for (i = 0; i < nraid_map_entries; i++) {
 		logical_drive->phys_disk[i] = NULL;
 		if (!logical_drive->offload_config)
@@ -1548,6 +1556,13 @@ static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
 				continue;
 			if (dev[j]->ioaccel_handle == dd[i].ioaccel_handle) {
 				logical_drive->phys_disk[i] = dev[j];
+				logical_drive->queue_depth = min(h->nr_cmds,
+				    logical_drive->queue_depth +
+				    logical_drive->phys_disk[i]->queue_depth);
+				dev_info(&h->pdev->dev,
+					"setting phys_disk[%d] to dev[%d]=%p, qd=%d\n",
+					i, j, dev[j],
+					logical_drive->queue_depth); /* ROBROB development only - remove this print */
 				break;
 			}
 		}
@@ -1559,9 +1574,20 @@ static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
 		 * present.  And in that case offload_enabled should already
 		 * be 0, but we'll turn it off here just in case
 		 */
-		if (!logical_drive->phys_disk[i])
+		if (!logical_drive->phys_disk[i]) {
 			logical_drive->offload_enabled = 0;
+			logical_drive->offload_to_be_enabled = 0;
+			logical_drive->queue_depth = h->nr_cmds;
+		}
 	}
+	if (nraid_map_entries) 
+		/* exclude parity drives from calculation */
+		logical_drive->queue_depth = min(h->nr_cmds,
+			logical_drive->queue_depth *
+			logical_drive->raid_map.data_disks_per_row /
+			nraid_map_entries);
+	else
+		logical_drive->queue_depth = h->nr_cmds;
 }
 
 static void hpsa_update_log_drive_phys_drive_ptrs(struct ctlr_info *h,
@@ -1660,7 +1686,7 @@ static void adjust_hpsa_scsi_table(struct ctlr_info *h, int hostno,
 		if (sd[i]->volume_offline) {
 			hpsa_show_volume_status(h, sd[i]);
 			dev_info(&h->pdev->dev,
-				"offline scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+				"offline scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d qd=%d\n",
 				hostno, sd[i]->bus, sd[i]->target, sd[i]->lun,
 				scsi_device_type(sd[i]->devtype),
 				sd[i]->vendor,
@@ -1670,7 +1696,8 @@ static void adjust_hpsa_scsi_table(struct ctlr_info *h, int hostno,
 					raid_label[sd[i]->raid_level],
 				sd[i]->offload_config ? '+' : '-',
 				sd[i]->offload_enabled ? '+' : '-',
-				sd[i]->expose_state);
+				sd[i]->expose_state,
+				sd[i]->queue_depth);
 			continue;
 		}
 
@@ -3236,6 +3263,7 @@ static int hpsa_update_device_info(struct ctlr_info *h,
 		this_device->offload_to_be_enabled = 0;
 		this_device->hba_ioaccel_enabled = 0;
 		this_device->volume_offline = 0;
+		this_device->queue_depth = h->nr_cmds;
 	}
 
 	if (is_OBDR_device) {
@@ -4864,16 +4892,16 @@ static int hpsa_scan_finished(struct Scsi_Host *sh,
 static int hpsa_change_queue_depth(struct scsi_device *sdev,
 	int qdepth, int reason)
 {
-	struct ctlr_info *h = sdev_to_hba(sdev);
-
 	if (reason == SCSI_QDEPTH_DEFAULT || reason == SCSI_QDEPTH_RAMP_UP) {
+		struct hpsa_scsi_dev_t *logical_drive = sdev->hostdata;
+
+		if (!logical_drive)
+			return -ENODEV;
+
 		if (qdepth < 1)
 			qdepth = 1;
-		else if (qdepth > h->nr_cmds)
-			qdepth = h->nr_cmds - HPSA_CMDS_RESERVED_FOR_ABORTS -
-						HPSA_CMDS_RESERVED_FOR_DRIVER -
-						HPSA_MAX_CONCURRENT_PASSTHRUS;
-
+		else if (qdepth > logical_drive->queue_depth)
+			qdepth = logical_drive->queue_depth;
 
 		scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), qdepth);
 	} else if (reason == SCSI_QDEPTH_QFULL)
