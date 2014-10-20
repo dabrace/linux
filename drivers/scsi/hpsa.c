@@ -215,6 +215,7 @@ static int hpsa_scan_finished(struct Scsi_Host *sh,
 	unsigned long elapsed_time);
 static int hpsa_change_queue_depth(struct scsi_device *sdev,
 	int qdepth, int reason);
+static int hpsa_change_queue_type(struct scsi_device *sdev, int type);
 
 static int hpsa_eh_device_reset_handler(struct scsi_cmnd *scsicmd);
 static int hpsa_eh_abort_handler(struct scsi_cmnd *scsicmd);
@@ -874,6 +875,7 @@ static struct scsi_host_template hpsa_driver_template = {
 	.scan_start		= hpsa_scan_start,
 	.scan_finished		= hpsa_scan_finished,
 	.change_queue_depth	= hpsa_change_queue_depth,
+	.change_queue_type	= hpsa_change_queue_type,
 	.this_id		= -1,
 	.use_clustering		= ENABLE_CLUSTERING,
 	.eh_abort_handler	= hpsa_eh_abort_handler,
@@ -4873,6 +4875,20 @@ static int hpsa_change_queue_depth(struct scsi_device *sdev,
 			qdepth = h->nr_cmds;
 	scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), qdepth);
 	return sdev->queue_depth;
+}
+
+static int hpsa_change_queue_type(struct scsi_device *sdev, int tag_type)
+{
+	if (sdev->tagged_supported) {
+		scsi_set_tag_type(sdev, tag_type);
+		if (tag_type)
+			scsi_activate_tcq(sdev, sdev->queue_depth);
+		else
+			scsi_deactivate_tcq(sdev, sdev->queue_depth);
+	} else
+		tag_type = 0;
+
+	return tag_type;
 }
 
 static void hpsa_unregister_scsi(struct ctlr_info *h)
