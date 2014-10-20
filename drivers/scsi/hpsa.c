@@ -4701,7 +4701,7 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 			rc = hpsa_ioaccel_submit(h, c, cmd, dev->scsi3addr);
 			if (rc == 0)
 				return;
-			if (rc < 0) {
+			if (rc == SCSI_MLQUEUE_HOST_BUSY) {
 				/*
 				 * If we get here, it means dma mapping failed.
 				 * Try again via scsi mid layer, which will
@@ -4714,7 +4714,7 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 				cmd->scsi_done(cmd);
 				return;
 			}
-			/* if rc > 0, fall thru and resubmit down CISS path */
+			/* else, fall thru and resubmit down CISS path */
 		}
 	}
 	hpsa_cmd_partial_init(c->h, c->cmdindex, c);
@@ -4774,7 +4774,7 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 		rc = hpsa_ioaccel_submit(h, c, cmd, scsi3addr);
 		if (rc == 0)
 			return 0;
-		if (rc < 0)
+		if (rc == SCSI_MLQUEUE_HOST_BUSY)
 			return SCSI_MLQUEUE_HOST_BUSY;
 	}
 	return hpsa_ciss_submit(h, c, cmd, scsi3addr);
