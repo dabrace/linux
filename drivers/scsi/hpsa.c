@@ -3484,8 +3484,7 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 	set_encrypt_ioaccel2(h, c, cp);
 
 	cp->scsi_nexus = ioaccel_handle;
-	cp->Tag = (c->cmdindex << DIRECT_LOOKUP_SHIFT) |
-				DIRECT_LOOKUP_BIT;
+	cp->Tag = c->cmdindex << DIRECT_LOOKUP_SHIFT;
 	memcpy(cp->cdb, cdb, sizeof(cp->cdb));
 
 	/* fill in sg elements */
@@ -3920,9 +3919,7 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 
 	c->Header.ReplyQueue = 0;  /* unused in simple mode */
 	memcpy(&c->Header.LUN.LunAddrBytes[0], &scsi3addr[0], 8);
-	c->Header.tag = cpu_to_le64(
-				(u64) ((c->cmdindex << DIRECT_LOOKUP_SHIFT) |
-					DIRECT_LOOKUP_BIT));
+	c->Header.tag = cpu_to_le64((u64) c->cmdindex << DIRECT_LOOKUP_SHIFT);
 
 	/* Fill in the request block... */
 
@@ -4518,10 +4515,8 @@ static struct CommandList *cmd_alloc(struct ctlr_info *h)
 
 	c = h->cmd_pool + i;
 	memset(c, 0, sizeof(*c));
-	c->Header.tag = cpu_to_le64((u64) (i << DIRECT_LOOKUP_SHIFT) |
-						DIRECT_LOOKUP_BIT);
-	cmd_dma_handle = h->cmd_pool_dhandle
-	    + i * sizeof(*c);
+	c->Header.tag = cpu_to_le64((u64) i << DIRECT_LOOKUP_SHIFT);
+	cmd_dma_handle = h->cmd_pool_dhandle + i * sizeof(*c);
 	c->err_info = h->errinfo_pool + i;
 	memset(c->err_info, 0, sizeof(*c->err_info));
 	err_dma_handle = h->errinfo_pool_dhandle
@@ -5239,11 +5234,6 @@ static inline void finish_cmd(struct CommandList *c)
 		complete(c->waiting);
 }
 
-static inline u32 hpsa_tag_to_index(u32 tag)
-{
-	return tag >> DIRECT_LOOKUP_SHIFT;
-}
-
 
 static inline u32 hpsa_tag_discard_error_bits(struct ctlr_info *h, u32 tag)
 {
@@ -5261,7 +5251,7 @@ static inline void process_indexed_cmd(struct ctlr_info *h,
 	u32 tag_index;
 	struct CommandList *c;
 
-	tag_index = hpsa_tag_to_index(raw_tag);
+	tag_index = raw_tag >> DIRECT_LOOKUP_SHIFT;
 	if (!bad_tag(h, tag_index, raw_tag)) {
 		c = h->cmd_pool + tag_index;
 		finish_cmd(c);
@@ -7078,9 +7068,7 @@ static void hpsa_enter_performant_mode(struct ctlr_info *h, u32 trans_support)
 			cp->host_context_flags = IOACCEL1_HCFLAGS_CISS_FORMAT;
 			cp->timeout_sec = 0;
 			cp->ReplyQueue = 0;
-			cp->tag =
-				cpu_to_le64((u64) ((i << DIRECT_LOOKUP_SHIFT) |
-						DIRECT_LOOKUP_BIT));
+			cp->tag = cpu_to_le64((u64) i << DIRECT_LOOKUP_SHIFT);
 			cp->host_addr =
 				cpu_to_le64((u64) (h->ioaccel_cmd_pool_dhandle +
 					(i * sizeof(struct io_accel1_cmd))));
