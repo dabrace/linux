@@ -1593,8 +1593,10 @@ static int hpsa_slave_alloc(struct scsi_device *sdev)
 	spin_lock_irqsave(&h->devlock, flags);
 	sd = lookup_hpsa_scsi_dev(h, sdev_channel(sdev),
 		sdev_id(sdev), sdev->lun);
-	if (sd != NULL)
+	if (sd && (sd->expose_state & HPSA_SCSI_ADD))
 		sdev->hostdata = sd;
+	else
+		sdev->hostdata = NULL;
 	spin_unlock_irqrestore(&h->devlock, flags);
 	return 0;
 }
