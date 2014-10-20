@@ -2685,7 +2685,7 @@ out:
 }
 
 static int hpsa_send_reset(struct ctlr_info *h, unsigned char *scsi3addr,
-	u8 reset_type)
+	u8 reset_type, int reply_queue)
 {
 	int rc = IO_OK;
 	struct CommandList *c;
@@ -2697,7 +2697,7 @@ static int hpsa_send_reset(struct ctlr_info *h, unsigned char *scsi3addr,
 	(void) fill_cmd(c, HPSA_DEVICE_RESET_MSG, h, NULL, 0, 0,
 			scsi3addr, TYPE_MSG);
 	c->Request.CDB[1] = reset_type; /* fill_cmd defaults to LUN reset */
-	rc = hpsa_scsi_do_simple_cmd_core(h, c, NO_TIMEOUT);
+	rc = __hpsa_scsi_do_simple_cmd_core(h, c, reply_queue, NO_TIMEOUT);
 	if (rc) {
 		dev_warn(&h->pdev->dev, "Failed to send reset command\n");
 		goto out;
@@ -5068,7 +5068,8 @@ static int hpsa_eh_device_reset_handler(struct scsi_cmnd *scsicmd)
 		dev->expose_state);
 
 	/* send a reset to the SCSI LUN which the command was sent to */
-	rc = hpsa_send_reset(h, dev->scsi3addr, HPSA_RESET_TYPE_LUN);
+	rc = hpsa_send_reset(h, dev->scsi3addr, HPSA_RESET_TYPE_LUN,
+			     DEFAULT_REPLY_QUEUE);
 	if (rc == 0 && wait_for_device_to_become_ready(h, dev->scsi3addr) == 0)
 		return SUCCESS;
 
@@ -5208,8 +5209,7 @@ static void setup_ioaccel2_abort_cmd(struct CommandList *c, struct ctlr_info *h,
  */
 
 static int hpsa_send_reset_as_abort_ioaccel2(struct ctlr_info *h,
-	unsigned char *scsi3addr, struct CommandList *abort,
-	__attribute__((unused)) int reply_queue)
+	unsigned char *scsi3addr, struct CommandList *abort, int reply_queue)
 {
 	int rc = IO_OK;
 	struct scsi_cmnd *scmd; /* scsi command within request being aborted */
@@ -5251,7 +5251,7 @@ static int hpsa_send_reset_as_abort_ioaccel2(struct ctlr_info *h,
 			"Reset as abort: Resetting physical device at scsi3addr 0x%02x%02x%02x%02x%02x%02x%02x%02x\n",
 			psa[0], psa[1], psa[2], psa[3],
 			psa[4], psa[5], psa[6], psa[7]);
-	rc = hpsa_send_reset(h, psa, HPSA_RESET_TYPE_TARGET);
+	rc = hpsa_send_reset(h, psa, HPSA_RESET_TYPE_TARGET, reply_queue);
 	if (rc != 0) {
 		dev_warn(&h->pdev->dev,
 			"Reset as abort: Failed on physical device at scsi3addr 0x%02x%02x%02x%02x%02x%02x%02x%02x\n",
