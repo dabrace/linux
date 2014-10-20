@@ -1540,11 +1540,12 @@ static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
 	int i, j;
 	int nraid_map_entries = map->row_cnt * map->layout_map_count *
 		(map->data_disks_per_row + map->metadata_disks_per_row);
+	int qdepth;
 
 	if (nraid_map_entries > RAID_MAP_MAX_ENTRIES)
 		nraid_map_entries = RAID_MAP_MAX_ENTRIES;
 
-	logical_drive->queue_depth = 0;
+	qdepth = 0;
 	for (i = 0; i < nraid_map_entries; i++) {
 		logical_drive->phys_disk[i] = NULL;
 		if (!logical_drive->offload_config)
@@ -1554,17 +1555,13 @@ static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
 				continue;
 			if (is_logical_dev_addr_mode(dev[j]->scsi3addr))
 				continue;
-			if (dev[j]->ioaccel_handle == dd[i].ioaccel_handle) {
-				logical_drive->phys_disk[i] = dev[j];
-				logical_drive->queue_depth = min(h->nr_cmds,
-				    logical_drive->queue_depth +
-				    logical_drive->phys_disk[i]->queue_depth);
-				dev_info(&h->pdev->dev,
-					"setting phys_disk[%d] to dev[%d]=%p, qd=%d\n",
-					i, j, dev[j],
-					logical_drive->queue_depth); /* ROBROB development only - remove this print */
-				break;
-			}
+			if (dev[j]->ioaccel_handle != dd[i].ioaccel_handle)
+				continue;
+
+			logical_drive->phys_disk[i] = dev[j];
+			qdepth = min(h->nr_cmds, qdepth +
+				logical_drive->phys_disk[i]->queue_depth);
+			break;
 		}
 
 		/*
@@ -1580,12 +1577,12 @@ static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
 			logical_drive->queue_depth = h->nr_cmds;
 		}
 	}
-	if (nraid_map_entries) 
-		/* exclude parity drives from calculation */
-		logical_drive->queue_depth = min(h->nr_cmds,
-			logical_drive->queue_depth *
-			logical_drive->raid_map.data_disks_per_row /
-			nraid_map_entries);
+	if (nraid_map_entries)
+		/*
+		 * This is correct for reads, too high for full stripe writes,
+		 * way too high for partial stripe writes
+		 */
+		logical_drive->queue_depth = qdepth;
 	else
 		logical_drive->queue_depth = h->nr_cmds;
 }
