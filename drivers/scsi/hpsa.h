@@ -64,6 +64,16 @@ struct hpsa_scsi_dev_t {
 #define HPSA_ULD_ATTACH		0x2
 #define HPSA_SCSI_ADD		(HPSA_SG_ATTACH | HPSA_ULD_ATTACH)
 	u8 expose_state;
+
+	/* Pointers from logical drive map indices to the phys drives that
+	 * make those logical drives.  Note, multiple logical drives may
+	 * share physical drives.  You can have for instance 5 physical
+	 * drives with 3 logical drives each using those same 5 physical
+	 * disks. We need these pointers for counting i/o's out to physical
+	 * devices in order to honor physical device queue depth limits.
+	 */
+	struct hpsa_scsi_dev_t *phys_disk[RAID_MAP_MAX_ENTRIES];
+	int nphysical_disks;
 };
 
 struct reply_queue_buffer {
