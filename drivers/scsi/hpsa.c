@@ -1509,8 +1509,11 @@ static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
 	struct raid_map_data *map = &logical_drive->raid_map;
 	struct raid_map_disk_data *dd = &map->data[0];
 	int i, j;
-	int nraid_map_entries = logical_drive->raid_map.data_disks_per_row +
-		logical_drive->raid_map.metadata_disks_per_row;
+	int nraid_map_entries = map->row_cnt * map->layout_map_count *
+		(map->data_disks_per_row + map->metadata_disks_per_row);
+
+	if (nraid_map_entries > RAID_MAP_MAX_ENTRIES)
+		nraid_map_entries = RAID_MAP_MAX_ENTRIES;
 
 	for (i = 0; i < nraid_map_entries; i++) {
 		logical_drive->phys_disk[i] = NULL;
