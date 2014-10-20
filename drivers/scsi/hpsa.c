@@ -6721,6 +6721,7 @@ static void fail_all_outstanding_cmds(struct ctlr_info *h)
 	int i, refcount;
 	struct CommandList *c;
 
+	flush_workqueue(hpsa_wq); /* ensure all cmds are fully built */
 	for (i = 0; i < h->nr_cmds; i++) {
 		c = h->cmd_pool + i;
 		refcount = atomic_inc_return(&c->refcount);
