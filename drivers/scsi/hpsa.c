@@ -2046,20 +2046,33 @@ static int hpsa_map_one(struct pci_dev *pdev,
 	return 0;
 }
 
-static inline void __hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
-	struct CommandList *c, int reply_queue)
+#define NO_TIMEOUT ((unsigned long) -1)
+#define DEFAULT_TIMEOUT (30000) /* milliseconds */
+static int __hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
+	struct CommandList *c, int reply_queue, unsigned long timeout_msecs)
 {
 	DECLARE_COMPLETION_ONSTACK(wait);
 
 	c->waiting = &wait;
 	__enqueue_cmd_and_start_io(h, c, reply_queue);
-	wait_for_completion(&wait);
+	if (timeout_msecs == NO_TIMEOUT) {
+		/* TODO: get rid of this no-timeout thing */
+		wait_for_completion_io(&wait);
+		return 0;
+	}
+	if (!wait_for_completion_io_timeout(&wait,
+					msecs_to_jiffies(timeout_msecs))) {
+		dev_warn(&h->pdev->dev, "Command timed out.\n");
+		return -ETIMEDOUT;
+	}
+	return 0;
 }
 
-static inline void hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
-	struct CommandList *c)
+static int hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
+	struct CommandList *c, unsigned long timeout_msecs)
 {
-	__hpsa_scsi_do_simple_cmd_core(h, c, DEFAULT_REPLY_QUEUE);
+	return __hpsa_scsi_do_simple_cmd_core(h, c,
+					DEFAULT_REPLY_QUEUE, timeout_msecs);
 }
 
 static u32 lockup_detected(struct ctlr_info *h)
@@ -2074,25 +2087,29 @@ static u32 lockup_detected(struct ctlr_info *h)
 	return rc;
 }
 
-static void hpsa_scsi_do_simple_cmd_core_if_no_lockup(struct ctlr_info *h,
-	struct CommandList *c)
+static int hpsa_scsi_do_simple_cmd_core_if_no_lockup(struct ctlr_info *h,
+	struct CommandList *c, unsigned long timeout_msecs)
 {
 	/* If controller lockup detected, fake a hardware error. */
-	if (unlikely(lockup_detected(h)))
+	if (unlikely(lockup_detected(h))) {
 		c->err_info->CommandStatus = CMD_HARDWARE_ERR;
-	else
-		hpsa_scsi_do_simple_cmd_core(h, c);
+		return 0;
+	}
+	return hpsa_scsi_do_simple_cmd_core(h, c, timeout_msecs);
 }
 
 #define MAX_DRIVER_CMD_RETRIES 25
-static void hpsa_scsi_do_simple_cmd_with_retry(struct ctlr_info *h,
-	struct CommandList *c, int data_direction)
+static int hpsa_scsi_do_simple_cmd_with_retry(struct ctlr_info *h,
+	struct CommandList *c, int data_direction, unsigned long timeout_msecs)
 {
 	int backoff_time = 10, retry_count = 0;
+	int rc;
 
 	do {
 		memset(c->err_info, 0, sizeof(*c->err_info));
-		hpsa_scsi_do_simple_cmd_core(h, c);
+		rc = hpsa_scsi_do_simple_cmd_core(h, c, timeout_msecs);
+		if (rc)
+			break;
 		retry_count++;
 		if (retry_count > 3) {
 			msleep(backoff_time);
@@ -2103,6 +2120,9 @@ static void hpsa_scsi_do_simple_cmd_with_retry(struct ctlr_info *h,
 			check_for_busy(h, c)) &&
 			retry_count <= MAX_DRIVER_CMD_RETRIES);
 	hpsa_pci_unmap(h->pdev, c, 1, data_direction);
+	if (retry_count > MAX_DRIVER_CMD_RETRIES)
+		rc = -1; /* FIXME do something better? */
+	return rc;
 }
 
 static void hpsa_print_cmd(struct ctlr_info *h, char *txt,
@@ -2206,7 +2226,10 @@ static int hpsa_scsi_do_inquiry(struct ctlr_info *h, unsigned char *scsi3addr,
 		rc = -1;
 		goto out;
 	}
-	hpsa_scsi_do_simple_cmd_with_retry(h, c, PCI_DMA_FROMDEVICE);
+	rc = hpsa_scsi_do_simple_cmd_with_retry(h, c,
+					PCI_DMA_FROMDEVICE, NO_TIMEOUT);
+	if (rc)
+		goto out;
 	ei = c->err_info;
 	if (ei->CommandStatus != 0 && ei->CommandStatus != CMD_DATA_UNDERRUN) {
 		hpsa_scsi_interpret_error(h, c);
@@ -2237,7 +2260,10 @@ static int hpsa_bmic_ctrl_mode_sense(struct ctlr_info *h,
 		rc = -1;
 		goto out;
 	}
-	hpsa_scsi_do_simple_cmd_with_retry(h, c, PCI_DMA_FROMDEVICE);
+	rc = hpsa_scsi_do_simple_cmd_with_retry(h, c,
+			PCI_DMA_FROMDEVICE, NO_TIMEOUT);
+	if (rc)
+		goto out;
 	ei = c->err_info;
 	if (ei->CommandStatus != 0 && ei->CommandStatus != CMD_DATA_UNDERRUN) {
 		hpsa_scsi_interpret_error(h, c);
@@ -2265,7 +2291,11 @@ static int hpsa_send_reset(struct ctlr_info *h, unsigned char *scsi3addr,
 	(void) fill_cmd(c, HPSA_DEVICE_RESET_MSG, h, NULL, 0, 0,
 			scsi3addr, TYPE_MSG);
 	c->Request.CDB[1] = reset_type; /* fill_cmd defaults to LUN reset */
-	hpsa_scsi_do_simple_cmd_core(h, c);
+	rc = hpsa_scsi_do_simple_cmd_core(h, c, NO_TIMEOUT);
+	if (rc) {
+		dev_warn(&h->pdev->dev, "Failed to send reset command\n");
+		goto out;
+	}
 	/* no unmap needed here because no data xfer. */
 
 	ei = c->err_info;
@@ -2273,6 +2303,7 @@ static int hpsa_send_reset(struct ctlr_info *h, unsigned char *scsi3addr,
 		hpsa_scsi_interpret_error(h, c);
 		rc = -1;
 	}
+out:
 	cmd_free(h, c);
 	return rc;
 }
@@ -2392,15 +2423,18 @@ static int hpsa_get_raid_map(struct ctlr_info *h,
 			sizeof(this_device->raid_map), 0,
 			scsi3addr, TYPE_CMD)) {
 		dev_warn(&h->pdev->dev, "Out of memory in hpsa_get_raid_map()\n");
-		cmd_free(h, c);
-		return -ENOMEM;
+		rc = -ENOMEM;
+		goto out;
 	}
-	hpsa_scsi_do_simple_cmd_with_retry(h, c, PCI_DMA_FROMDEVICE);
+	rc = hpsa_scsi_do_simple_cmd_with_retry(h, c,
+					PCI_DMA_FROMDEVICE, NO_TIMEOUT);
+	if (rc)
+		goto out;
 	ei = c->err_info;
 	if (ei->CommandStatus != 0 && ei->CommandStatus != CMD_DATA_UNDERRUN) {
 		hpsa_scsi_interpret_error(h, c);
-		cmd_free(h, c);
-		return -1;
+		rc = -1;
+		goto out;
 	}
 	cmd_free(h, c);
 
@@ -2411,6 +2445,9 @@ static int hpsa_get_raid_map(struct ctlr_info *h,
 		rc = -1;
 	}
 	hpsa_debug_map_buff(h, rc, &this_device->raid_map);
+	return rc;
+out:
+	cmd_free(h, c);
 	return rc;
 }
 
@@ -2536,7 +2573,10 @@ static int hpsa_scsi_do_report_luns(struct ctlr_info *h, int logical,
 	}
 	if (extended_response)
 		c->Request.CDB[1] = extended_response;
-	hpsa_scsi_do_simple_cmd_with_retry(h, c, PCI_DMA_FROMDEVICE);
+	rc = hpsa_scsi_do_simple_cmd_with_retry(h, c,
+					PCI_DMA_FROMDEVICE, NO_TIMEOUT);
+	if (rc)
+		goto out;
 	ei = c->err_info;
 	if (ei->CommandStatus != 0 &&
 	    ei->CommandStatus != CMD_DATA_UNDERRUN) {
@@ -2627,7 +2667,7 @@ static int hpsa_volume_offline(struct ctlr_info *h,
 {
 	struct CommandList *c;
 	unsigned char *sense, sense_key, asc, ascq;
-	int ldstat = 0;
+	int rc, ldstat = 0;
 	u16 cmd_status;
 	u8 scsi_status;
 #define ASC_LUN_NOT_READY 0x04
@@ -2638,7 +2678,11 @@ static int hpsa_volume_offline(struct ctlr_info *h,
 	if (!c)
 		return 0;
 	(void) fill_cmd(c, TEST_UNIT_READY, h, NULL, 0, 0, scsi3addr, TYPE_CMD);
-	hpsa_scsi_do_simple_cmd_core(h, c);
+	rc = hpsa_scsi_do_simple_cmd_core(h, c, NO_TIMEOUT);
+	if (rc) {
+		cmd_free(h, c);
+		return 0;
+	}
 	sense = c->err_info->SenseInfo;
 	sense_key = sense[2];
 	asc = sense[12];
@@ -4349,7 +4393,9 @@ static int wait_for_device_to_become_ready(struct ctlr_info *h,
 		/* Send the Test Unit Ready, fill_cmd can't fail, no mapping */
 		(void) fill_cmd(c, TEST_UNIT_READY, h,
 				NULL, 0, 0, lunaddr, TYPE_CMD);
-		hpsa_scsi_do_simple_cmd_core(h, c);
+		rc = hpsa_scsi_do_simple_cmd_core(h, c, NO_TIMEOUT);
+		if (rc)
+			goto do_it_again;
 		/* no unmap needed here because no data xfer. */
 
 		if (c->err_info->CommandStatus == CMD_SUCCESS)
@@ -4360,7 +4406,7 @@ static int wait_for_device_to_become_ready(struct ctlr_info *h,
 			(c->err_info->SenseInfo[2] == NO_SENSE ||
 			c->err_info->SenseInfo[2] == UNIT_ATTENTION))
 			break;
-
+do_it_again:
 		dev_warn(&h->pdev->dev, "waiting %d secs "
 			"for device to become ready.\n", waittime);
 		rc = 1; /* device not ready. */
@@ -4461,7 +4507,7 @@ static int hpsa_send_abort(struct ctlr_info *h, unsigned char *scsi3addr,
 		0, 0, scsi3addr, TYPE_MSG);
 	if (swizzle)
 		swizzle_abort_tag(&c->Request.CDB[4]);
-	__hpsa_scsi_do_simple_cmd_core(h, c, reply_queue);
+	(void) __hpsa_scsi_do_simple_cmd_core(h, c, reply_queue, NO_TIMEOUT);
 	hpsa_get_tag(h, abort, &taglower, &tagupper);
 	dev_dbg(&h->pdev->dev, "%s: Tag:0x%08x:%08x: do_simple_cmd_core completed.\n",
 		__func__, tagupper, taglower);
@@ -4976,7 +5022,9 @@ static int hpsa_passthru_ioctl(struct ctlr_info *h, void __user *argp)
 		c->SG[0].Len = cpu_to_le32(iocommand.buf_size);
 		c->SG[0].Ext = cpu_to_le32(HPSA_SG_LAST); /* not chaining */
 	}
-	hpsa_scsi_do_simple_cmd_core_if_no_lockup(h, c);
+	rc = hpsa_scsi_do_simple_cmd_core_if_no_lockup(h, c, NO_TIMEOUT);
+	if (rc)
+		rc = -EIO;
 	if (iocommand.buf_size > 0)
 		hpsa_pci_unmap(h->pdev, c, 1, PCI_DMA_BIDIRECTIONAL);
 	check_ioctl_unit_attention(h, c);
@@ -5107,7 +5155,11 @@ static int hpsa_big_passthru_ioctl(struct ctlr_info *h, void __user *argp)
 				cpu_to_le32((i == sg_used) * HPSA_SG_LAST);
 		}
 	}
-	hpsa_scsi_do_simple_cmd_core_if_no_lockup(h, c);
+	status = hpsa_scsi_do_simple_cmd_core_if_no_lockup(h, c, NO_TIMEOUT);
+	if (status) {
+		status = -EIO;
+		goto cleanup0;
+	}
 	if (sg_used)
 		hpsa_pci_unmap(h->pdev, c, sg_used, PCI_DMA_BIDIRECTIONAL);
 	check_ioctl_unit_attention(h, c);
@@ -6969,6 +7021,7 @@ static void hpsa_flush_cache(struct ctlr_info *h)
 {
 	char *flush_buf;
 	struct CommandList *c;
+	int rc;
 
 	/* Don't bother trying to flush the cache if locked up */
 	if (unlikely(lockup_detected(h)))
@@ -6986,7 +7039,10 @@ static void hpsa_flush_cache(struct ctlr_info *h)
 		RAID_CTLR_LUNID, TYPE_CMD)) {
 		goto out;
 	}
-	hpsa_scsi_do_simple_cmd_with_retry(h, c, PCI_DMA_TODEVICE);
+	rc = hpsa_scsi_do_simple_cmd_with_retry(h, c,
+					PCI_DMA_TODEVICE, NO_TIMEOUT);
+	if (rc)
+		goto out;
 	if (c->err_info->CommandStatus != 0)
 out:
 		dev_warn(&h->pdev->dev,
