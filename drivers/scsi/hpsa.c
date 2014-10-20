@@ -307,6 +307,38 @@ static int check_for_busy(struct ctlr_info *h, struct CommandList *c)
 	return 1;
 }
 
+static ssize_t host_store_lockup_detector(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	struct Scsi_Host *shost;
+	struct ctlr_info *h;
+	int len, enabled;
+	char tmpbuf[10];
+
+	if (!capable(CAP_SYS_ADMIN) || !capable(CAP_SYS_RAWIO))
+		return -EACCES;
+	len = count > sizeof(tmpbuf) - 1 ? sizeof(tmpbuf) - 1 : count;
+	strncpy(tmpbuf, buf, len);
+	tmpbuf[len] = '\0';
+	if (sscanf(tmpbuf, "%d", &enabled) != 1)
+		return -EINVAL;
+	shost = class_to_shost(dev);
+	h = shost_to_hba(shost);
+	h->lockup_detector_enabled = !!enabled;
+	return count;
+}
+
+static ssize_t host_show_lockup_detector(struct device *dev,
+	     struct device_attribute *attr, char *buf)
+{
+	struct ctlr_info *h;
+	struct Scsi_Host *shost = class_to_shost(dev);
+
+	h = shost_to_hba(shost);
+	return snprintf(buf, 20, "%d\n", h->lockup_detector_enabled);
+}
+
 static ssize_t host_store_hp_ssd_smart_path_status(struct device *dev,
 					 struct device_attribute *attr,
 					 const char *buf, size_t count)
@@ -640,6 +672,8 @@ static DEVICE_ATTR(transport_mode, S_IRUGO,
 	host_show_transport_mode, NULL);
 static DEVICE_ATTR(resettable, S_IRUGO,
 	host_show_resettable, NULL);
+static DEVICE_ATTR(lockup_detector, S_IWUSR|S_IRUGO,
+	host_show_lockup_detector, host_store_lockup_detector);
 
 static struct device_attribute *hpsa_sdev_attrs[] = {
 	&dev_attr_raid_level,
@@ -657,6 +691,7 @@ static struct device_attribute *hpsa_shost_attrs[] = {
 	&dev_attr_resettable,
 	&dev_attr_hp_ssd_smart_path_status,
 	&dev_attr_raid_offload_debug,
+	&dev_attr_lockup_detector,
 	NULL,
 };
 
@@ -6469,6 +6504,9 @@ static void detect_controller_lockup(struct ctlr_info *h)
 	u32 heartbeat;
 	unsigned long flags;
 
+	if (!h->lockup_detector_enabled)
+		return;
+
 	now = get_jiffies_64();
 	/* If we've received an interrupt recently, we're ok. */
 	if (time_after64(h->last_intr_timestamp +
@@ -6768,6 +6806,7 @@ reinit_after_soft_reset:
 		h->acciopath_status = 1;
 
 	h->drv_req_rescan = 0;
+	h->lockup_detector_enabled = 1;
 
 	/* Turn the interrupts on so we can service requests */
 	h->access.set_intr_mask(h, HPSA_INTR_ON);
