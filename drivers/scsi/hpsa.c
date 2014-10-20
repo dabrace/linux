@@ -1137,14 +1137,17 @@ lun_assigned:
 	added[*nadded] = device;
 	(*nadded)++;
 
-	/* initially, (before registering with scsi layer) we don't
-	 * know our hostno and we don't want to print anything first
-	 * time anyway (the scsi layer's inquiries will show that info)
-	 */
-	/* if (hostno != -1) */
-		dev_info(&h->pdev->dev, "%s device c%db%dt%dl%d added.\n",
-			scsi_device_type(device->devtype), hostno,
-			device->bus, device->target, device->lun);
+	dev_info(&h->pdev->dev,
+		"added scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+		hostno, device->bus, device->target, device->lun,
+		scsi_device_type(device->devtype),
+		device->vendor,
+		device->model,
+		device->raid_level > RAID_UNKNOWN ?
+			"RAID-?" : raid_label[device->raid_level],
+		device->offload_config ? '+' : '-',
+		device->offload_enabled ? '+' : '-',
+		device->expose_state);
 	return 0;
 }
 
@@ -1175,9 +1178,17 @@ static void hpsa_scsi_update_entry(struct ctlr_info *h, int hostno,
 	h->dev[entry]->offload_to_mirror = new_entry->offload_to_mirror;
 	h->dev[entry]->offload_enabled = new_entry->offload_enabled;
 
-	dev_info(&h->pdev->dev, "%s device c%db%dt%dl%d updated.\n",
-		scsi_device_type(new_entry->devtype), hostno, new_entry->bus,
-		new_entry->target, new_entry->lun);
+	dev_info(&h->pdev->dev,
+		"updated scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+		hostno, new_entry->bus, new_entry->target, new_entry->lun,
+		scsi_device_type(new_entry->devtype),
+		new_entry->vendor,
+		new_entry->model,
+		new_entry->raid_level > RAID_UNKNOWN ?
+			"RAID-?" : raid_label[new_entry->raid_level],
+		new_entry->offload_config ? '+' : '-',
+		new_entry->offload_enabled ? '+' : '-',
+		new_entry->expose_state);
 }
 
 /* Replace an entry from h->dev[] array. */
@@ -1203,9 +1214,17 @@ static void hpsa_scsi_replace_entry(struct ctlr_info *h, int hostno,
 	h->dev[entry] = new_entry;
 	added[*nadded] = new_entry;
 	(*nadded)++;
-	dev_info(&h->pdev->dev, "%s device c%db%dt%dl%d changed.\n",
-		scsi_device_type(new_entry->devtype), hostno, new_entry->bus,
-			new_entry->target, new_entry->lun);
+	dev_info(&h->pdev->dev,
+		"replaced scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+		hostno, new_entry->bus, new_entry->target, new_entry->lun,
+		scsi_device_type(new_entry->devtype),
+		new_entry->vendor,
+		new_entry->model,
+		new_entry->raid_level > RAID_UNKNOWN ?
+			"RAID-?" : raid_label[new_entry->raid_level],
+		new_entry->offload_config ? '+' : '-',
+		new_entry->offload_enabled ? '+' : '-',
+		new_entry->expose_state);
 }
 
 /* Remove an entry from h->dev[] array. */
@@ -1225,9 +1244,17 @@ static void hpsa_scsi_remove_entry(struct ctlr_info *h, int hostno, int entry,
 	for (i = entry; i < h->ndevices-1; i++)
 		h->dev[i] = h->dev[i+1];
 	h->ndevices--;
-	dev_info(&h->pdev->dev, "%s device c%db%dt%dl%d removed.\n",
-		scsi_device_type(sd->devtype), hostno, sd->bus, sd->target,
-		sd->lun);
+	dev_info(&h->pdev->dev,
+		"removed scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+		hostno, sd->bus, sd->target, sd->lun,
+		scsi_device_type(sd->devtype),
+		sd->vendor,
+		sd->model,
+		sd->raid_level > RAID_UNKNOWN ?
+			"RAID-?" : raid_label[sd->raid_level],
+		sd->offload_config ? '+' : '-',
+		sd->offload_enabled ? '+' : '-',
+		sd->expose_state);
 }
 
 #define SCSI3ADDR_EQ(a, b) ( \
@@ -1516,9 +1543,18 @@ static void adjust_hpsa_scsi_table(struct ctlr_info *h, int hostno,
 		 */
 		if (sd[i]->volume_offline) {
 			hpsa_show_volume_status(h, sd[i]);
-			dev_info(&h->pdev->dev, "c%db%dt%dl%d: temporarily offline\n",
-				h->scsi_host->host_no,
-				sd[i]->bus, sd[i]->target, sd[i]->lun);
+			dev_info(&h->pdev->dev,
+				"offline scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+				hostno, sd[i]->bus, sd[i]->target, sd[i]->lun,
+				scsi_device_type(sd[i]->devtype),
+				sd[i]->vendor,
+				sd[i]->model,
+				sd[i]->raid_level > RAID_UNKNOWN ?
+					"RAID-?" :
+					raid_label[sd[i]->raid_level],
+				sd[i]->offload_config ? '+' : '-',
+				sd[i]->offload_enabled ? '+' : '-',
+				sd[i]->expose_state);
 			continue;
 		}
 
@@ -1574,7 +1610,7 @@ static void adjust_hpsa_scsi_table(struct ctlr_info *h, int hostno,
 				 * timeout as if the device was gone.
 				 */
 				dev_warn(&h->pdev->dev,
-					"didn't find c%db%dt%dl%d for removal.",
+					"didn't find scsi %d:%d:%d:%d for removal.",
 					hostno, removed[i]->bus,
 					removed[i]->target, removed[i]->lun);
 			}
@@ -1590,8 +1626,9 @@ static void adjust_hpsa_scsi_table(struct ctlr_info *h, int hostno,
 		if (scsi_add_device(sh, added[i]->bus,
 			added[i]->target, added[i]->lun) == 0)
 			continue;
-		dev_warn(&h->pdev->dev, "scsi_add_device c%db%dt%dl%d failed, "
-			"device not added.\n", hostno, added[i]->bus,
+		dev_warn(&h->pdev->dev,
+			"scsi %d:%d:%d:%d addition failed, device not added.\n",
+			hostno, added[i]->bus,
 			added[i]->target, added[i]->lun);
 		/* now we have to remove it from h->dev,
 		 * since it didn't get added to scsi mid layer
@@ -4566,14 +4603,26 @@ static int hpsa_eh_device_reset_handler(struct scsi_cmnd *scsicmd)
 			"device lookup failed.\n");
 		return FAILED;
 	}
-	dev_warn(&h->pdev->dev, "resetting device %d:%d:%d:%d\n",
-		h->scsi_host->host_no, dev->bus, dev->target, dev->lun);
+	dev_warn(&h->pdev->dev,
+		"resetting scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+		h->scsi_host->host_no, dev->bus, dev->target, dev->lun,
+		scsi_device_type(dev->devtype),
+		dev->vendor,
+		dev->model,
+		dev->raid_level > RAID_UNKNOWN ?
+			"RAID-?" : raid_label[dev->raid_level],
+		dev->offload_config ? '+' : '-',
+		dev->offload_enabled ? '+' : '-',
+		dev->expose_state);
+
 	/* send a reset to the SCSI LUN which the command was sent to */
 	rc = hpsa_send_reset(h, dev->scsi3addr, HPSA_RESET_TYPE_LUN);
 	if (rc == 0 && wait_for_device_to_become_ready(h, dev->scsi3addr) == 0)
 		return SUCCESS;
 
-	dev_warn(&h->pdev->dev, "resetting device failed.\n");
+	dev_warn(&h->pdev->dev,
+		"resetting scsi %d:%d:%d:%d failed\n",
+		h->scsi_host->host_no, dev->bus, dev->target, dev->lun);
 	return FAILED;
 }
 
@@ -4690,7 +4739,7 @@ static int hpsa_send_reset_as_abort_ioaccel2(struct ctlr_info *h,
 
 	if (h->raid_offload_debug > 0)
 		dev_info(&h->pdev->dev,
-			"Reset as abort: Abort requested on C%d:B%d:T%d:L%d scsi3addr 0x%02x%02x%02x%02x%02x%02x%02x%02x\n",
+			"Reset as abort: scsi %d:%d:%d:%d scsi3addr 0x%02x%02x%02x%02x%02x%02x%02x%02x\n",
 			h->scsi_host->host_no, dev->bus, dev->target, dev->lun,
 			scsi3addr[0], scsi3addr[1], scsi3addr[2], scsi3addr[3],
 			scsi3addr[4], scsi3addr[5], scsi3addr[6], scsi3addr[7]);
@@ -4795,7 +4844,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		return FAILED;
 
 	memset(msg, 0, sizeof(msg));
-	ml += sprintf(msg+ml, "ABORT REQUEST on C%d:B%d:T%d:L%llu ",
+	ml += sprintf(msg+ml, "Aborting command on scsi %d:%d:%d:%llu ",
 		h->scsi_host->host_no, sc->device->channel,
 		sc->device->id, sc->device->lun);
 
@@ -4842,7 +4891,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		ml += sprintf(msg+ml, "Command:0x%x SN:0x%lx ",
 			as->cmnd[0], as->serial_number);
 	dev_dbg(&h->pdev->dev, "%s\n", msg);
-	dev_warn(&h->pdev->dev, "Abort request on C%d:B%d:T%d:L%d\n",
+	dev_warn(&h->pdev->dev, "Aborting command on scsi %d:%d:%d:%d\n",
 		h->scsi_host->host_no, dev->bus, dev->target, dev->lun);
 	/*
 	 * Command is in flight, or possibly already completed
@@ -4851,8 +4900,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	 */
 	rc = hpsa_send_abort_both_ways(h, dev->scsi3addr, abort, reply_queue);
 	if (rc != 0) {
-		dev_dbg(&h->pdev->dev, "%s Request FAILED.\n", msg);
-		dev_warn(&h->pdev->dev, "FAILED abort on device C%d:B%d:T%d:L%d\n",
+		dev_warn(&h->pdev->dev, "FAILED abort command on scsi %d:%d:%d:%d\n",
 			h->scsi_host->host_no,
 			dev->bus, dev->target, dev->lun);
 		cmd_free(h, abort);
