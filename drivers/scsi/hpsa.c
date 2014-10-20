@@ -1282,7 +1282,7 @@ lun_assigned:
 		device->raid_level > RAID_UNKNOWN ?
 			"RAID-?" : raid_label[device->raid_level],
 		device->offload_config ? '+' : '-',
-		device->offload_enabled ? '+' : '-',
+		device->offload_to_be_enabled ? '+' : '-',
 		device->expose_state);
 	return 0;
 }
@@ -1336,7 +1336,7 @@ static void hpsa_scsi_update_entry(struct ctlr_info *h, int hostno,
 		h->dev[entry]->raid_level > RAID_UNKNOWN ?
 			"RAID-?" : raid_label[h->dev[entry]->raid_level],
 		h->dev[entry]->offload_config ? '+' : '-',
-		h->dev[entry]->offload_enabled ? '+' : '-',
+		h->dev[entry]->offload_to_be_enabled ? '+' : '-',
 		h->dev[entry]->expose_state);
 }
 
@@ -1374,7 +1374,7 @@ static void hpsa_scsi_replace_entry(struct ctlr_info *h, int hostno,
 		new_entry->raid_level > RAID_UNKNOWN ?
 			"RAID-?" : raid_label[new_entry->raid_level],
 		new_entry->offload_config ? '+' : '-',
-		new_entry->offload_enabled ? '+' : '-',
+		new_entry->offload_to_be_enabled ? '+' : '-',
 		new_entry->expose_state);
 }
 
