@@ -7994,7 +7994,7 @@ clean_up:
 			h->nr_cmds * sizeof(*h->ioaccel2_cmd_pool),
 			h->ioaccel2_cmd_pool, h->ioaccel2_cmd_pool_dhandle);
 	kfree(h->ioaccel2_blockFetchTable);
-	return 1;
+	return -ENOMEM;
 }
 
 static void hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h)
