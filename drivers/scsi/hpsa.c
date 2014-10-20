@@ -4860,20 +4860,27 @@ static int hpsa_scan_finished(struct Scsi_Host *sh,
 	return finished;
 }
 
+/* scsi host template change_queue_depth function */
 static int hpsa_change_queue_depth(struct scsi_device *sdev,
 	int qdepth, int reason)
 {
 	struct ctlr_info *h = sdev_to_hba(sdev);
 
-	if (reason != SCSI_QDEPTH_DEFAULT)
+	if (reason == SCSI_QDEPTH_DEFAULT || reason == SCSI_QDEPTH_RAMP_UP) {
+		if (qdepth < 1)
+			qdepth = 1;
+		else if (qdepth > h->nr_cmds)
+			qdepth = h->nr_cmds - HPSA_CMDS_RESERVED_FOR_ABORTS -
+						HPSA_CMDS_RESERVED_FOR_DRIVER -
+						HPSA_MAX_CONCURRENT_PASSTHRUS;
+
+
+		scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), qdepth);
+	} else if (reason == SCSI_QDEPTH_QFULL)
+		scsi_track_queue_full(sdev, qdepth);
+	else
 		return -ENOTSUPP;
 
-	if (qdepth < 1)
-		qdepth = 1;
-	else
-		if (qdepth > h->nr_cmds)
-			qdepth = h->nr_cmds;
-	scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev), qdepth);
 	return sdev->queue_depth;
 }
 
