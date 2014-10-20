@@ -80,7 +80,10 @@
  * Note - the initial logging level can be set here to log events at boot time.
  * After the system is up, you may enable logging via the /proc interface.
  */
-unsigned int scsi_logging_level;
+unsigned int scsi_logging_level =
+	(0x5 & ((1 << SCSI_LOG_ERROR_BITS) - 1)) << SCSI_LOG_ERROR_SHIFT |
+	(0x1 & ((1 << SCSI_LOG_MLCOMPLETE_BITS) - 1)) << SCSI_LOG_MLCOMPLETE_SHIFT;
+
 #if defined(CONFIG_SCSI_LOGGING)
 EXPORT_SYMBOL(scsi_logging_level);
 #endif
