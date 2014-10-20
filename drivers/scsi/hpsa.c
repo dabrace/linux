@@ -1853,10 +1853,22 @@ static int hpsa_slave_alloc(struct scsi_device *sdev)
 	sd = lookup_hpsa_scsi_dev(h, sdev_channel(sdev),
 		sdev_id(sdev), sdev->lun);
 	if (sd && (sd->expose_state & HPSA_SCSI_ADD)) {
+		int queue_depth = sd->queue_depth;
+
+		if (queue_depth == 0)
+			queue_depth = sdev->host->can_queue;
+
 		sdev->hostdata = sd;
-		if (sd->queue_depth)
+
+		if (shost_use_blk_mq(sdev->host)) {
 			scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev),
-						sd->queue_depth);
+						queue_depth);
+		} else {
+			/* We depend on tags for cmd allocation. */
+			BUG_ON(!sdev->tagged_supported);
+			scsi_set_tag_type(sdev, MSG_SIMPLE_TAG);
+			scsi_activate_tcq(sdev, queue_depth);
+		}
 		atomic_set(&sd->ioaccel_cmds_out, 0);
 	} else {
 		sdev->hostdata = NULL;
@@ -4957,13 +4969,25 @@ static int hpsa_change_queue_depth(struct scsi_device *sdev,
 static int hpsa_change_queue_type(struct scsi_device *sdev, int tag_type)
 {
 	if (sdev->tagged_supported) {
-		scsi_set_tag_type(sdev, tag_type);
-		if (tag_type)
-			scsi_activate_tcq(sdev, sdev->queue_depth);
-		else
-			scsi_deactivate_tcq(sdev, sdev->queue_depth);
-	} else
+		if (shost_use_blk_mq(sdev->host)) {
+			scsi_set_tag_type(sdev, tag_type);
+			if (tag_type)
+				scsi_activate_tcq(sdev, sdev->queue_depth);
+			else
+				scsi_deactivate_tcq(sdev, sdev->queue_depth);
+		} else {
+			/* We require tags for our internal cmd allocation; if
+			 * the caller wants to switch tag types, that's fine,
+			 * but don't let them be disabled. */
+			if (tag_type)
+				scsi_set_tag_type(sdev, tag_type);
+			else
+				tag_type = scsi_get_tag_type(sdev);
+		}
+	} else {
+		BUG_ON(!shost_use_blk_mq(sdev->host));
 		tag_type = 0;
+	}
 
 	return tag_type;
 }
@@ -4999,6 +5023,11 @@ static int hpsa_register_scsi(struct ctlr_info *h)
 	sh->hostdata[0] = (unsigned long) h;
 	sh->irq = h->intr[h->intr_mode];
 	sh->unique_id = sh->irq;
+	if (!shost_use_blk_mq(sh)) {
+		error = scsi_init_shared_tag_map(sh, sh->can_queue);
+		if (error)
+			goto fail_host_put;
+	}
 	error = scsi_add_host(sh, &h->pdev->dev);
 	if (error)
 		goto fail_host_put;
@@ -5589,15 +5618,17 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 }
 
 /*
- * The block layer has already gone to the trouble of picking out a unique,
- * small-integer tag for this request.  We use an offset from that value as
- * an index to select our command block.  (The offset allows us to reserve
- * the low-numbered entries for our own uses.)
+ * One of the upper layers has already gone to the trouble of picking out a
+ * unique, small-integer tag for this request.  If the blk-mq support is not
+ * available, we use the SCSI tag in the SCSI command; otherwise, we use the
+ * block layer tag in the embedded request structure.  We use an offset from
+ * that value as an index to select our command block.  (The offset allows us to
+ * reserve the low-numbered entries for our own uses.)
  */
 static int hpsa_get_cmd_index(struct scsi_cmnd *scmd)
 {
 	struct scsi_device *dev = scmd->device;
-	int idx = scmd->request->tag;
+	int idx = shost_use_blk_mq(dev->host) ? scmd->request->tag : scmd->tag;
 
 	if (idx < 0) {
 		dev_err(&dev->sdev_dev , "Invalid block tag: %d\n", idx);
