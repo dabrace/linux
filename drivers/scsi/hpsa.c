@@ -1611,7 +1611,7 @@ static int hpsa_slave_configure(struct scsi_device *sdev)
 	h = sdev_to_hba(sdev);
 	spin_lock_irqsave(&h->devlock, flags);
 	sd = sdev->hostdata;
-	if (sd && sd->expose_state & HPSA_NO_ULD_ATTACH)
+	if (sd && !(sd->expose_state & HPSA_ULD_ATTACH))
 		sdev->no_uld_attach = 1;
 
 	spin_unlock_irqrestore(&h->devlock, flags);
@@ -3322,7 +3322,8 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 					"Masked physical device detected\n");
 			this_device->expose_state = HPSA_DO_NOT_EXPOSE;
 		} else {
-			this_device->expose_state = HPSA_EXPOSE;
+			this_device->expose_state =
+					HPSA_SG_ATTACH | HPSA_ULD_ATTACH;
 		}
 
 		switch (this_device->devtype) {
