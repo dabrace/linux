@@ -7359,18 +7359,19 @@ static void hpsa_drain_accel_commands(struct ctlr_info *h)
 {
 	struct CommandList *c = NULL;
 	int i, accel_cmds_out;
+	int refcount;
 
 	do { /* wait for all outstanding ioaccel commands to drain out */
 		accel_cmds_out = 0;
 		for (i = 0; i < h->nr_cmds; i++) {
-			if (!test_bit(i & (BITS_PER_LONG - 1),
-					h->cmd_pool_bits + (i / BITS_PER_LONG)))
-				continue;
 			c = h->cmd_pool + i;
-			accel_cmds_out += is_accelerated_cmd(c);
+			refcount = atomic_inc_return(&c->refcount);
+			if (refcount > 1) /* Command is allocated */
+				accel_cmds_out += is_accelerated_cmd(c);
+			cmd_free(h, c);
 		}
 		if (accel_cmds_out <= 0)
-				break;
+			break;
 		msleep(100);
 	} while (1);
 }
