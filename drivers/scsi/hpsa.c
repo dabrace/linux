@@ -190,6 +190,7 @@ static struct board_type products[] = {
 };
 
 static int number_of_controllers;
+static struct workqueue_struct *hpsa_wq;
 
 static irqreturn_t do_hpsa_intr_intx(int irq, void *dev_id);
 static irqreturn_t do_hpsa_intr_msi(int irq, void *dev_id);
@@ -1679,7 +1680,7 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 
 retry_cmd:
 	INIT_WORK(&c->work, hpsa_command_resubmit_worker);
-	schedule_work_on(raw_smp_processor_id(), &c->work);
+	queue_work_on(raw_smp_processor_id(), hpsa_wq, &c->work);
 }
 
 static void complete_scsi_command(struct CommandList *cp)
@@ -1748,7 +1749,8 @@ static void complete_scsi_command(struct CommandList *cp)
 			if (ei->CommandStatus == CMD_IOACCEL_DISABLED)
 				dev->offload_enabled = 0;
 			INIT_WORK(&cp->work, hpsa_command_resubmit_worker);
-			schedule_work_on(raw_smp_processor_id(), &cp->work);
+			queue_work_on(raw_smp_processor_id(),
+					hpsa_wq, &cp->work);
 			return;
 		}
 	}
@@ -7339,12 +7341,19 @@ static void hpsa_drain_accel_commands(struct ctlr_info *h)
  */
 static int __init hpsa_init(void)
 {
+	hpsa_wq = alloc_workqueue("hpsa", WQ_MEM_RECLAIM, 0);
+	if (!hpsa_wq) {
+		pr_warn(HPSA "Failed to allocate work queue\n");
+		return -ENOMEM;
+	}
 	return pci_register_driver(&hpsa_pci_driver);
 }
 
 static void __exit hpsa_cleanup(void)
 {
 	pci_unregister_driver(&hpsa_pci_driver);
+	if (hpsa_wq)
+		destroy_workqueue(hpsa_wq);
 }
 
 static void __attribute__((unused)) verify_offsets(void)
