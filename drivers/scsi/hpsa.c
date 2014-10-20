@@ -2508,15 +2508,14 @@ static int __hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
 	return 0;
 }
 
-static int hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
-	struct CommandList *c, unsigned long timeout_msecs)
+static int hpsa_scsi_do_simple_cmd(struct ctlr_info *h, struct CommandList *c,
+				   int reply_queue, unsigned long timeout_msecs)
 {
 	if (unlikely(lockup_detected(h))) {
 		c->err_info->CommandStatus = CMD_CTLR_LOCKUP;
 		return 0;
 	}
-	return __hpsa_scsi_do_simple_cmd_core(h, c,
-					DEFAULT_REPLY_QUEUE, timeout_msecs);
+	return __hpsa_scsi_do_simple_cmd_core(h, c, reply_queue, timeout_msecs);
 }
 
 static u32 lockup_detected(struct ctlr_info *h)
@@ -2540,7 +2539,8 @@ static int hpsa_scsi_do_simple_cmd_with_retry(struct ctlr_info *h,
 
 	do {
 		memset(c->err_info, 0, sizeof(*c->err_info));
-		rc = hpsa_scsi_do_simple_cmd_core(h, c, timeout_msecs);
+		rc = hpsa_scsi_do_simple_cmd(h, c, DEFAULT_REPLY_QUEUE,
+						  timeout_msecs);
 		if (rc)
 			break;
 		retry_count++;
@@ -3132,7 +3132,7 @@ static int hpsa_volume_offline(struct ctlr_info *h,
 	c = cmd_alloc(h);
 
 	(void) fill_cmd(c, TEST_UNIT_READY, h, NULL, 0, 0, scsi3addr, TYPE_CMD);
-	rc = hpsa_scsi_do_simple_cmd_core(h, c, NO_TIMEOUT);
+	rc = hpsa_scsi_do_simple_cmd(h, c, DEFAULT_REPLY_QUEUE, NO_TIMEOUT);
 	if (rc) {
 		cmd_free(h, c);
 		return 0;
@@ -5865,7 +5865,7 @@ static int hpsa_passthru_ioctl(struct ctlr_info *h, void __user *argp)
 		c->SG[0].Len = cpu_to_le32(iocommand.buf_size);
 		c->SG[0].Ext = cpu_to_le32(HPSA_SG_LAST); /* not chaining */
 	}
-	rc = hpsa_scsi_do_simple_cmd_core(h, c, NO_TIMEOUT);
+	rc = hpsa_scsi_do_simple_cmd(h, c, DEFAULT_REPLY_QUEUE, NO_TIMEOUT);
 	if (rc)
 		rc = -EIO;
 	if (iocommand.buf_size > 0)
@@ -5995,7 +5995,7 @@ static int hpsa_big_passthru_ioctl(struct ctlr_info *h, void __user *argp)
 				cpu_to_le32((i == sg_used) * HPSA_SG_LAST);
 		}
 	}
-	status = hpsa_scsi_do_simple_cmd_core(h, c, NO_TIMEOUT);
+	status = hpsa_scsi_do_simple_cmd(h, c, DEFAULT_REPLY_QUEUE, NO_TIMEOUT);
 	if (status) {
 		status = -EIO;
 		goto cleanup0;
