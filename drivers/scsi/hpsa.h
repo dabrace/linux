@@ -237,6 +237,7 @@ struct ctlr_info {
 	int	acciopath_status;
 	int	raid_offload_debug;
 	int	lockup_detector_enabled;
+	int	needs_abort_tags_swizzled;
 };
 
 struct offline_device_entry {

@@ -574,30 +574,43 @@ static u32 soft_unresettable_controller[] = {
 	0x409D0E11, /* Smart Array 6400 EM */
 };
 
-static int ctlr_is_hard_resettable(u32 board_id)
+static u32 needs_abort_tags_swizzled[] = {
+	0x324a103C, /* Smart Array P712m */
+	0x324b103C, /* SmartArray P711m */
+};
+
+static int board_id_in_array(u32 a[], int nelems, u32 board_id)
 {
 	int i;
 
-	for (i = 0; i < ARRAY_SIZE(unresettable_controller); i++)
-		if (unresettable_controller[i] == board_id)
-			return 0;
-	return 1;
+	for (i = 0; i < nelems; i++)
+		if (a[i] == board_id)
+			return 1;
+	return 0;
+}
+
+static int ctlr_is_hard_resettable(u32 board_id)
+{
+	return !board_id_in_array(unresettable_controller,
+			ARRAY_SIZE(unresettable_controller), board_id);
 }
 
 static int ctlr_is_soft_resettable(u32 board_id)
 {
-	int i;
-
-	for (i = 0; i < ARRAY_SIZE(soft_unresettable_controller); i++)
-		if (soft_unresettable_controller[i] == board_id)
-			return 0;
-	return 1;
+	return !board_id_in_array(soft_unresettable_controller,
+			ARRAY_SIZE(soft_unresettable_controller), board_id);
 }
 
 static int ctlr_is_resettable(u32 board_id)
 {
 	return ctlr_is_hard_resettable(board_id) ||
 		ctlr_is_soft_resettable(board_id);
+}
+
+static int ctlr_needs_abort_tags_swizzled(u32 board_id)
+{
+	return board_id_in_array(needs_abort_tags_swizzled,
+			ARRAY_SIZE(needs_abort_tags_swizzled), board_id);
 }
 
 static ssize_t host_show_resettable(struct device *dev,
@@ -4552,7 +4565,7 @@ static void hpsa_get_tag(struct ctlr_info *h,
 }
 
 static int hpsa_send_abort(struct ctlr_info *h, unsigned char *scsi3addr,
-	struct CommandList *abort, int swizzle, int reply_queue)
+	struct CommandList *abort, int reply_queue)
 {
 	int rc = IO_OK;
 	struct CommandList *c;
@@ -4568,7 +4581,7 @@ static int hpsa_send_abort(struct ctlr_info *h, unsigned char *scsi3addr,
 	/* fill_cmd can't fail here, no buffer to map */
 	(void) fill_cmd(c, HPSA_ABORT_MSG, h, &abort->Header.tag,
 		0, 0, scsi3addr, TYPE_MSG);
-	if (swizzle)
+	if (h->needs_abort_tags_swizzled)
 		swizzle_abort_tag(&c->Request.CDB[4]);
 	(void) __hpsa_scsi_do_simple_cmd_core(h, c, reply_queue, NO_TIMEOUT);
 	hpsa_get_tag(h, abort, &taglower, &tagupper);
@@ -4674,12 +4687,6 @@ static int hpsa_send_reset_as_abort_ioaccel2(struct ctlr_info *h,
 	return rc; /* success */
 }
 
-/* Some Smart Arrays need the abort tag swizzled, and some don't.  It's hard to
- * tell which kind we're dealing with, so we send the abort both ways.  There
- * shouldn't be any collisions between swizzled and unswizzled tags due to the
- * way we construct our tags but we check anyway in case the assumptions which
- * make this true someday become false.
- */
 static int hpsa_send_abort_both_ways(struct ctlr_info *h,
 	unsigned char *scsi3addr, struct CommandList *abort, int reply_queue)
 {
@@ -4691,9 +4698,7 @@ static int hpsa_send_abort_both_ways(struct ctlr_info *h,
 	if (abort->cmd_type == CMD_IOACCEL2)
 		return hpsa_send_reset_as_abort_ioaccel2(h, scsi3addr,
 							abort, reply_queue);
-
-	return hpsa_send_abort(h, scsi3addr, abort, 0, reply_queue) &&
-			hpsa_send_abort(h, scsi3addr, abort, 1, reply_queue);
+	return hpsa_send_abort(h, scsi3addr, abort, reply_queue);
 }
 
 /* Find out which reply queue a command was meant to return on */
@@ -6396,6 +6401,9 @@ static int hpsa_pci_init(struct ctlr_info *h)
 		return -ENODEV;
 	h->product_name = products[prod_index].product_name;
 	h->access = *(products[prod_index].access);
+
+	h->needs_abort_tags_swizzled =
+		ctlr_needs_abort_tags_swizzled(h->board_id);
 
 	pci_disable_link_state(h->pdev, PCIE_LINK_STATE_L0S |
 			       PCIE_LINK_STATE_L1 | PCIE_LINK_STATE_CLKPM);
