@@ -7701,9 +7701,18 @@ static int hpsa_offline_devices_ready(struct ctlr_info *h)
 	return 0;
 }
 
-static void hpsa_rescan_ctlr_worker(struct work_struct *work)
+static void hpsa_requeue_worker(struct ctlr_info *h, struct delayed_work *wi)
 {
 	unsigned long flags;
+
+	spin_lock_irqsave(&h->lock, flags);
+	if (!h->remove_in_progress)
+		schedule_delayed_work(wi, h->heartbeat_sample_interval);
+	spin_unlock_irqrestore(&h->lock, flags);
+}
+
+static void hpsa_rescan_ctlr_worker(struct work_struct *work)
+{
 	struct ctlr_info *h = container_of(to_delayed_work(work),
 					struct ctlr_info, rescan_ctlr_work);
 
@@ -7713,32 +7722,19 @@ static void hpsa_rescan_ctlr_worker(struct work_struct *work)
 		hpsa_scan_start(h->scsi_host);
 		scsi_host_put(h->scsi_host);
 	}
-	spin_lock_irqsave(&h->lock, flags);
-	if (h->remove_in_progress) {
-		spin_unlock_irqrestore(&h->lock, flags);
-		return;
-	}
-	schedule_delayed_work(&h->rescan_ctlr_work,
-				h->heartbeat_sample_interval);
-	spin_unlock_irqrestore(&h->lock, flags);
+
+	hpsa_requeue_worker(h, &h->rescan_ctlr_work);
 }
 
 static void hpsa_monitor_ctlr_worker(struct work_struct *work)
 {
-	unsigned long flags;
 	struct ctlr_info *h = container_of(to_delayed_work(work),
 					struct ctlr_info, monitor_ctlr_work);
 	detect_controller_lockup(h);
 	if (lockup_detected(h))
 		return;
 
-	spin_lock_irqsave(&h->lock, flags);
-	if (h->remove_in_progress)
-		spin_unlock_irqrestore(&h->lock, flags);
-	else
-		schedule_delayed_work(&h->monitor_ctlr_work,
-				h->heartbeat_sample_interval);
-	spin_unlock_irqrestore(&h->lock, flags);
+	hpsa_requeue_worker(h, &h->monitor_ctlr_work);
 }
 
 static int hpsa_init_one(struct pci_dev *pdev, const struct pci_device_id *ent)
