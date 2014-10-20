@@ -7466,10 +7466,13 @@ reinit_after_soft_reset:
 	 */
 	BUILD_BUG_ON(sizeof(struct CommandList) % COMMANDLIST_ALIGNMENT);
 	h = kzalloc(sizeof(*h), GFP_KERNEL);
-	if (!h)
+	if (!h) {
+		dev_err(&pdev->dev, "Failed to allocate controller head\n");
 		return -ENOMEM;
+	}
 
 	h->pdev = pdev;
+
 	h->intr_mode = hpsa_simple_mode ? SIMPLE_MODE_INT : PERF_MODE_INT;
 	INIT_LIST_HEAD(&h->offline_device_list);
 	spin_lock_init(&h->lock);
@@ -7480,13 +7483,14 @@ reinit_after_soft_reset:
 
 	h->resubmit_wq = alloc_workqueue("hpsa", WQ_MEM_RECLAIM, 0);
 	if (!h->resubmit_wq) {
-		dev_warn(&h->pdev->dev, "Failed to allocate work queue\n");
+		dev_err(&h->pdev->dev, "Failed to allocate work queue\n");
 		rc = -ENOMEM;
 		goto clean1;	/* aer/h */
 	}
 	/* Allocate and clear per-cpu variable lockup_detected */
 	h->lockup_detected = alloc_percpu(u32);
 	if (!h->lockup_detected) {
+		dev_err(&h->pdev->dev, "Failed to allocate lockup detector\n");
 		rc = -ENOMEM;
 		goto clean1;	/* wq/aer/h */
 	}
