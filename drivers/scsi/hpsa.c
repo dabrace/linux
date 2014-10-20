@@ -1698,10 +1698,14 @@ static int hpsa_slave_alloc(struct scsi_device *sdev)
 	spin_lock_irqsave(&h->devlock, flags);
 	sd = lookup_hpsa_scsi_dev(h, sdev_channel(sdev),
 		sdev_id(sdev), sdev->lun);
-	if (sd && (sd->expose_state & HPSA_SCSI_ADD))
+	if (sd && (sd->expose_state & HPSA_SCSI_ADD)) {
 		sdev->hostdata = sd;
-	else
+		if (sd->queue_depth)
+			scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev),
+						sd->queue_depth);
+	} else {
 		sdev->hostdata = NULL;
+	}
 	spin_unlock_irqrestore(&h->devlock, flags);
 	return 0;
 }
@@ -3317,6 +3321,7 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 	 */
 	struct ReportExtendedLUNdata *physdev_list = NULL;
 	struct ReportLUNdata *logdev_list = NULL;
+	struct bmic_identify_physical_device *id_phys = NULL;
 	u32 nphysicals = 0;
 	u32 nlogicals = 0;
 	u32 ndev_allocated = 0;
@@ -3324,6 +3329,9 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 	int ncurrent = 0;
 	int i, n_ext_target_devs, ndevs_to_allocate;
 	int raid_ctlr_position;
+	u8 bmic_bus;
+	u8 bmic_lev_two_tgt;
+	u16 bmic_drive_number;
 	int rescan_hba_mode;
 	DECLARE_BITMAP(lunzerobits, MAX_EXT_TARGETS);
 
@@ -3331,8 +3339,10 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 	physdev_list = kzalloc(sizeof(*physdev_list), GFP_KERNEL);
 	logdev_list = kzalloc(sizeof(*logdev_list), GFP_KERNEL);
 	tmpdevice = kzalloc(sizeof(*tmpdevice), GFP_KERNEL);
+	id_phys = kzalloc(sizeof(*id_phys), GFP_KERNEL);
 
-	if (!currentsd || !physdev_list || !logdev_list || !tmpdevice) {
+	if (!currentsd || !physdev_list || !logdev_list ||
+		!tmpdevice || !id_phys) {
 		dev_err(&h->pdev->dev, "out of memory\n");
 		goto out;
 	}
@@ -3463,9 +3473,28 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 			}
 			if (h->transMethod & CFGTBL_Trans_io_accel1 ||
 				h->transMethod & CFGTBL_Trans_io_accel2) {
+				int rc;
+
 				memcpy(&this_device->ioaccel_handle,
 					&lunaddrbytes[20],
 					sizeof(this_device->ioaccel_handle));
+				bmic_bus = lunaddrbytes[7] & 0x3F;
+				bmic_lev_two_tgt = lunaddrbytes[6];
+				bmic_drive_number = ((bmic_bus - 1) << 8) +
+							bmic_lev_two_tgt;
+
+				memset(id_phys, 0, sizeof(*id_phys));
+				rc = hpsa_bmic_id_physical_device(h, lunaddrbytes,
+						bmic_drive_number, id_phys,
+						sizeof(*id_phys));
+				if (!rc)
+					/* Reserve space for FW operations */
+#define DRIVE_CMDS_RESERVED_FOR_FW 2
+					this_device->queue_depth =
+						le16_to_cpu(id_phys->current_queue_depth_limit) -
+							DRIVE_CMDS_RESERVED_FOR_FW;
+				else
+					this_device->queue_depth = 7; /* conservative */
 				ncurrent++;
 			}
 			break;
@@ -3501,6 +3530,7 @@ out:
 	kfree(currentsd);
 	kfree(physdev_list);
 	kfree(logdev_list);
+	kfree(id_phys);
 }
 
 /* hpsa_scatter_gather takes a struct scsi_cmnd, (cmd), and does the pci
@@ -4630,10 +4660,7 @@ static int hpsa_register_scsi(struct ctlr_info *h)
 			HPSA_CMDS_RESERVED_FOR_ABORTS -
 			HPSA_CMDS_RESERVED_FOR_DRIVER -
 			HPSA_MAX_CONCURRENT_PASSTHRUS;
-	if (h->hba_mode_enabled)
-		sh->cmd_per_lun = 7;
-	else
-		sh->cmd_per_lun = sh->can_queue;
+	sh->cmd_per_lun = sh->can_queue;
 	sh->sg_tablesize = h->maxsgentries;
 	h->scsi_host = sh;
 	sh->hostdata[0] = (unsigned long) h;
