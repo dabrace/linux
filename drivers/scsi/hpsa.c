@@ -2452,6 +2452,10 @@ static int __hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
 static int hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
 	struct CommandList *c, unsigned long timeout_msecs)
 {
+	if (unlikely(lockup_detected(h))) {
+		c->err_info->CommandStatus = CMD_CTLR_LOCKUP;
+		return 0;
+	}
 	return __hpsa_scsi_do_simple_cmd_core(h, c,
 					DEFAULT_REPLY_QUEUE, timeout_msecs);
 }
@@ -2466,16 +2470,6 @@ static u32 lockup_detected(struct ctlr_info *h)
 	rc = *lockup_detected;
 	put_cpu();
 	return rc;
-}
-
-static int hpsa_scsi_do_simple_cmd_core_if_no_lockup(struct ctlr_info *h,
-	struct CommandList *c, unsigned long timeout_msecs)
-{
-	if (unlikely(lockup_detected(h))) {
-		c->err_info->CommandStatus = CMD_CTLR_LOCKUP;
-		return 0;
-	}
-	return hpsa_scsi_do_simple_cmd_core(h, c, timeout_msecs);
 }
 
 #define MAX_DRIVER_CMD_RETRIES 25
@@ -2584,6 +2578,9 @@ static void hpsa_scsi_interpret_error(struct ctlr_info *h,
 		break;
 	case CMD_UNABORTABLE:
 		hpsa_print_cmd(h, "unabortable", cp);
+		break;
+	case CMD_CTLR_LOCKUP:
+		hpsa_print_cmd(h, "controller lockup detected", cp);
 		break;
 	default:
 		hpsa_print_cmd(h, "unknown status", cp);
@@ -4537,6 +4534,9 @@ static int hpsa_scsi_ioaccel_raid_map(struct ctlr_info *h,
 }
 
 /* Submit commands down the "normal" RAID stack path */
+/* All callers to hpsa_ciss_submit must check lockup_detected
+ * beforehand, before (opt.) and after calling cmd_alloc
+ */
 static int hpsa_ciss_submit(struct ctlr_info *h,
 	struct CommandList *c, struct scsi_cmnd *cmd,
 	unsigned char scsi3addr[])
@@ -4752,7 +4752,7 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 
 	if (unlikely(lockup_detected(h))) {
 		cmd->result = DID_NO_CONNECT << 16;
-		cmd_free(h, c);
+		cmd_free(h, c); /* FIXME may not be necessary, as lockup detector also frees everything */
 		cmd->scsi_done(cmd);
 		return 0;
 	}
@@ -5602,7 +5602,7 @@ static int hpsa_passthru_ioctl(struct ctlr_info *h, void __user *argp)
 		c->SG[0].Len = cpu_to_le32(iocommand.buf_size);
 		c->SG[0].Ext = cpu_to_le32(HPSA_SG_LAST); /* not chaining */
 	}
-	rc = hpsa_scsi_do_simple_cmd_core_if_no_lockup(h, c, NO_TIMEOUT);
+	rc = hpsa_scsi_do_simple_cmd_core(h, c, NO_TIMEOUT);
 	if (rc)
 		rc = -EIO;
 	if (iocommand.buf_size > 0)
@@ -5732,7 +5732,7 @@ static int hpsa_big_passthru_ioctl(struct ctlr_info *h, void __user *argp)
 				cpu_to_le32((i == sg_used) * HPSA_SG_LAST);
 		}
 	}
-	status = hpsa_scsi_do_simple_cmd_core_if_no_lockup(h, c, NO_TIMEOUT);
+	status = hpsa_scsi_do_simple_cmd_core(h, c, NO_TIMEOUT);
 	if (status) {
 		status = -EIO;
 		goto cleanup0;
@@ -7692,6 +7692,7 @@ static void hpsa_flush_cache(struct ctlr_info *h)
 	int rc;
 
 	/* Don't bother trying to flush the cache if locked up */
+	/* FIXME not necessary if do_simple_cmd does the check */
 	if (unlikely(lockup_detected(h)))
 		return;
 	flush_buf = kzalloc(4, GFP_KERNEL);
