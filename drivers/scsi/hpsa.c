@@ -4813,6 +4813,18 @@ static int hpsa_extract_reply_queue(struct ctlr_info *h,
 	return c->Header.ReplyQueue;
 }
 
+/*
+ * Limit concurrency of abort commands to prevent
+ * over-subscription of commands
+ */
+static inline int wait_for_available_abort_cmd(struct ctlr_info *h)
+{
+#define ABORT_CMD_WAIT_MSECS 5000
+	return !wait_event_timeout(h->abort_cmd_wait_queue,
+			atomic_dec_if_positive(&h->abort_cmds_available) >= 0,
+			msecs_to_jiffies(ABORT_CMD_WAIT_MSECS));
+}
+
 /* Send an abort for the specified command.
  *	If the device and controller support it,
  *		send a task abort request.
@@ -4899,7 +4911,15 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	 * by the firmware (but not to the scsi mid layer) but we can't
 	 * distinguish which.  Send the abort down.
 	 */
+	if (wait_for_available_abort_cmd(h)) {
+		dev_warn(&h->pdev->dev,
+			"Timed out waiting for an abort command to become available.\n");
+		cmd_free(h, abort);
+		return FAILED;
+	}
 	rc = hpsa_send_abort_both_ways(h, dev->scsi3addr, abort, reply_queue);
+	atomic_inc(&h->abort_cmds_available);
+	wake_up_all(&h->abort_cmd_wait_queue);
 	if (rc != 0) {
 		dev_warn(&h->pdev->dev, "FAILED abort command on scsi %d:%d:%d:%d\n",
 			h->scsi_host->host_no,
@@ -7064,6 +7084,7 @@ reinit_after_soft_reset:
 	spin_lock_init(&h->offline_device_lock);
 	spin_lock_init(&h->scan_lock);
 	atomic_set(&h->passthru_cmds_avail, HPSA_MAX_CONCURRENT_PASSTHRUS);
+	atomic_set(&h->abort_cmds_available, HPSA_CMDS_RESERVED_FOR_ABORTS);
 
 	h->resubmit_wq = alloc_workqueue("hpsa", WQ_MEM_RECLAIM, 0);
 	if (!h->resubmit_wq) {
@@ -7114,6 +7135,7 @@ reinit_after_soft_reset:
 	if (hpsa_allocate_sg_chain_blocks(h))
 		goto clean4;
 	init_waitqueue_head(&h->scan_wait_queue);
+	init_waitqueue_head(&h->abort_cmd_wait_queue);
 	h->scan_finished = 1; /* no scan currently in progress */
 
 	pci_set_drvdata(pdev, h);

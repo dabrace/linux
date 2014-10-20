@@ -244,6 +244,8 @@ struct ctlr_info {
 	int	lockup_detector_enabled;
 	int	needs_abort_tags_swizzled;
 	struct workqueue_struct *resubmit_wq;
+	atomic_t abort_cmds_available;
+	wait_queue_head_t abort_cmd_wait_queue;
 };
 
 struct offline_device_entry {
