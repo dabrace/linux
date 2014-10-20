@@ -2129,6 +2129,21 @@ static int handle_ioaccel_mode2_error(struct ctlr_info *h,
 	return retry;	/* retry on raid path? */
 }
 
+static void hpsa_cmd_free_and_done(struct ctlr_info *h,
+		struct CommandList *c, struct scsi_cmnd *cmd)
+{
+	/* FIXME: should we clear c->scsi_cmd here?
+	 * E.g., instead of doing it in complete_scsi_command() */
+	cmd_free(h, c);		/* FIX-ME:  change to cmd_tagged_free(h, c) */
+	cmd->scsi_done(cmd);
+}
+
+static void hpsa_retry_cmd(struct ctlr_info *h, struct CommandList *c)
+{
+	INIT_WORK(&c->work, hpsa_command_resubmit_worker);
+	queue_work_on(raw_smp_processor_id(), h->resubmit_wq, &c->work);
+}
+
 static void process_ioaccel2_completion(struct ctlr_info *h,
 		struct CommandList *c, struct scsi_cmnd *cmd,
 		struct hpsa_scsi_dev_t *dev)
@@ -2139,11 +2154,8 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 
 	/* check for good status */
 	if (likely(c2->error_data.serv_response == 0 &&
-			c2->error_data.status == 0)) {
-		cmd_free(h, c);
-		cmd->scsi_done(cmd);
-		return;
-	}
+			c2->error_data.status == 0))
+		return hpsa_cmd_free_and_done(h, c, cmd);
 
 	/* Any RAID offload error results in retry which will use
 	 * the normal I/O path so the controller can handle whatever's
@@ -2155,19 +2167,14 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 		if (c2->error_data.status ==
 			IOACCEL2_STATUS_SR_IOACCEL_DISABLED)
 			dev->offload_enabled = 0;
-		goto retry_cmd;
+
+		return hpsa_retry_cmd(h, c);
 	}
 
 	if (handle_ioaccel_mode2_error(h, c, cmd, c2))
-		goto retry_cmd;
+		return hpsa_retry_cmd(h, c);
 
-	cmd_free(h, c);
-	cmd->scsi_done(cmd);
-	return;
-
-retry_cmd:
-	INIT_WORK(&c->work, hpsa_command_resubmit_worker);
-	queue_work_on(raw_smp_processor_id(), h->resubmit_wq, &c->work);
+	return hpsa_cmd_free_and_done(h, c, cmd);
 }
 
 /* Returns 0 on success, < 0 otherwise. */
@@ -2235,9 +2242,7 @@ static void complete_scsi_command(struct CommandList *cp)
 	if (unlikely(ei->CommandStatus == CMD_CTLR_LOCKUP)) {
 		/* DID_NO_CONNECT will prevent a retry */
 		cmd->result = DID_NO_CONNECT << 16;
-		cmd_free(h, cp);
-		cmd->scsi_done(cmd);
-		return;
+		return hpsa_cmd_free_and_done(h, cp, cmd);
 	}
 
 	if (cp->cmd_type == CMD_IOACCEL2)
@@ -2247,9 +2252,7 @@ static void complete_scsi_command(struct CommandList *cp)
 	if (ei->CommandStatus == 0) {
 		if (cp->cmd_type == CMD_IOACCEL1)
 			atomic_dec(&cp->phys_disk->ioaccel_cmds_out);
-		cmd_free(h, cp);
-		cmd->scsi_done(cmd);
-		return;
+		return hpsa_cmd_free_and_done(h, cp, cmd);
 	}
 
 	/* For I/O accelerator commands, copy over some fields to the normal
@@ -2271,10 +2274,7 @@ static void complete_scsi_command(struct CommandList *cp)
 		if (is_logical_dev_addr_mode(dev->scsi3addr)) {
 			if (ei->CommandStatus == CMD_IOACCEL_DISABLED)
 				dev->offload_enabled = 0;
-			INIT_WORK(&cp->work, hpsa_command_resubmit_worker);
-			queue_work_on(raw_smp_processor_id(),
-					h->resubmit_wq, &cp->work);
-			return;
+			return hpsa_retry_cmd(h, cp);
 		}
 	}
 
@@ -2420,8 +2420,7 @@ static void complete_scsi_command(struct CommandList *cp)
 	 */
 	cp->scsi_cmd = NULL;
 
-	cmd_free(h, cp);
-	cmd->scsi_done(cmd);
+	return hpsa_cmd_free_and_done(h, cp, cmd);
 }
 
 static void hpsa_pci_unmap(struct pci_dev *pdev,
@@ -4725,16 +4724,13 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 {
 	struct scsi_cmnd *cmd;
 	struct hpsa_scsi_dev_t *dev;
-	struct CommandList *c =
-			container_of(work, struct CommandList, work);
+	struct CommandList *c = container_of(work, struct CommandList, work);
 
 	cmd = c->scsi_cmd;
 	dev = cmd->device->hostdata;
 	if (!dev) {
 		cmd->result = DID_NO_CONNECT << 16;
-		cmd_free(c->h, c);
-		cmd->scsi_done(cmd);
-		return;
+		return hpsa_cmd_free_and_done(c->h, c, cmd);
 	}
 	if (c->cmd_type == CMD_IOACCEL2) {
 		struct ctlr_info *h = c->h;
