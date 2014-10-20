@@ -1273,7 +1273,7 @@ lun_assigned:
 	(*nadded)++;
 
 	dev_info(&h->pdev->dev,
-		"%6s scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d qd=%d\n",
+		"%6s scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
 		device->expose_state & HPSA_SCSI_ADD ? "added" : "masked",
 		hostno, device->bus, device->target, device->lun,
 		scsi_device_type(device->devtype),
@@ -1283,8 +1283,7 @@ lun_assigned:
 			"RAID-?" : raid_label[device->raid_level],
 		device->offload_config ? '+' : '-',
 		device->offload_enabled ? '+' : '-',
-		device->expose_state,
-		device->queue_depth);
+		device->expose_state);
 	return 0;
 }
 
@@ -1328,7 +1327,7 @@ static void hpsa_scsi_update_entry(struct ctlr_info *h, int hostno,
 	h->dev[entry]->queue_depth = new_entry->queue_depth;
 
 	dev_info(&h->pdev->dev,
-		"updated scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d qd=%d\n",
+		"updated scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
 		hostno, h->dev[entry]->bus,
 		h->dev[entry]->target, h->dev[entry]->lun,
 		scsi_device_type(h->dev[entry]->devtype),
@@ -1338,8 +1337,7 @@ static void hpsa_scsi_update_entry(struct ctlr_info *h, int hostno,
 			"RAID-?" : raid_label[h->dev[entry]->raid_level],
 		h->dev[entry]->offload_config ? '+' : '-',
 		h->dev[entry]->offload_enabled ? '+' : '-',
-		h->dev[entry]->expose_state,
-		h->dev[entry]->queue_depth);
+		h->dev[entry]->expose_state);
 }
 
 /* Replace an entry from h->dev[] array. */
@@ -1368,7 +1366,7 @@ static void hpsa_scsi_replace_entry(struct ctlr_info *h, int hostno,
 	added[*nadded] = new_entry;
 	(*nadded)++;
 	dev_info(&h->pdev->dev,
-		"replaced scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d qd=%d\n",
+		"replaced scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
 		hostno, new_entry->bus, new_entry->target, new_entry->lun,
 		scsi_device_type(new_entry->devtype),
 		new_entry->vendor,
@@ -1377,8 +1375,7 @@ static void hpsa_scsi_replace_entry(struct ctlr_info *h, int hostno,
 			"RAID-?" : raid_label[new_entry->raid_level],
 		new_entry->offload_config ? '+' : '-',
 		new_entry->offload_enabled ? '+' : '-',
-		new_entry->expose_state,
-		new_entry->queue_depth);
+		new_entry->expose_state);
 }
 
 /* Remove an entry from h->dev[] array. */
@@ -1399,7 +1396,7 @@ static void hpsa_scsi_remove_entry(struct ctlr_info *h, int hostno, int entry,
 		h->dev[i] = h->dev[i+1];
 	h->ndevices--;
 	dev_info(&h->pdev->dev,
-		"removed scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d qd=%d\n",
+		"removed scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
 		hostno, sd->bus, sd->target, sd->lun,
 		scsi_device_type(sd->devtype),
 		sd->vendor,
@@ -1408,8 +1405,7 @@ static void hpsa_scsi_remove_entry(struct ctlr_info *h, int hostno, int entry,
 			"RAID-?" : raid_label[sd->raid_level],
 		sd->offload_config ? '+' : '-',
 		sd->offload_enabled ? '+' : '-',
-		sd->expose_state,
-		sd->queue_depth);
+		sd->expose_state);
 }
 
 #define SCSI3ADDR_EQ(a, b) ( \
@@ -1786,7 +1782,7 @@ static void adjust_hpsa_scsi_table(struct ctlr_info *h, int hostno,
 		if (sd[i]->volume_offline) {
 			hpsa_show_volume_status(h, sd[i]);
 			dev_info(&h->pdev->dev,
-				"offline scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d qd=%d\n",
+				"offline scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
 				hostno, sd[i]->bus, sd[i]->target, sd[i]->lun,
 				scsi_device_type(sd[i]->devtype),
 				sd[i]->vendor,
@@ -1796,8 +1792,7 @@ static void adjust_hpsa_scsi_table(struct ctlr_info *h, int hostno,
 					raid_label[sd[i]->raid_level],
 				sd[i]->offload_config ? '+' : '-',
 				sd[i]->offload_enabled ? '+' : '-',
-				sd[i]->expose_state,
-				sd[i]->queue_depth);
+				sd[i]->expose_state);
 			continue;
 		}
 
