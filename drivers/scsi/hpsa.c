@@ -7487,8 +7487,8 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	/* Get rid of any controller monitoring work items */
 	spin_lock_irqsave(&h->lock, flags);
 	h->remove_in_progress = 1;
-	cancel_delayed_work(&h->monitor_ctlr_work);
-	cancel_delayed_work(&h->rescan_ctlr_work);
+	cancel_delayed_work_sync(&h->monitor_ctlr_work);
+	cancel_delayed_work_sync(&h->rescan_ctlr_work);
 	spin_unlock_irqrestore(&h->lock, flags);
 	hpsa_unregister_scsi(h);	/* unhook from SCSI subsystem */
 	hpsa_shutdown(pdev);
