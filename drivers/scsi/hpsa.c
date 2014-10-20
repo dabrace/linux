@@ -5036,38 +5036,48 @@ static int hpsa_send_test_unit_ready(struct ctlr_info *h,
 	return 1;
 }
 
-static int wait_for_device_to_become_ready(struct ctlr_info *h,
-	unsigned char lunaddr[])
+/* Wait for a TEST_UNIT_READY command to complete, retrying as necessary;
+ * returns zero when the unit is ready, and non-zero when giving up. */
+static int hpsa_wait_for_test_unit_ready(struct ctlr_info *h, struct CommandList *c,
+				    unsigned char lunaddr[], int reply_queue)
 {
 	int rc;
 	int count = 0;
 	int waittime = 1; /* seconds */
-	struct CommandList *c;
-
-	c = cmd_alloc(h);
 
 	/* Send test unit ready until device ready, or give up. */
-	while (count < HPSA_TUR_RETRY_LIMIT) {
+	for (count = 0; count < HPSA_TUR_RETRY_LIMIT; count++) {
 
 		/* Wait for a bit.  do this first, because if we send
 		 * the TUR right away, the reset will just abort it.
 		 */
 		msleep(1000 * waittime);
-		count++;
-		rc = 0; /* Device ready. */
+
+		rc = hpsa_send_test_unit_ready(h, c, lunaddr, reply_queue);
+		if (!rc)
+			break;
 
 		/* Increase wait time with each try, up to a point. */
 		if (waittime < HPSA_MAX_WAIT_INTERVAL_SECS)
 			waittime = waittime * 2;
 
-		rc = hpsa_send_test_unit_ready(h, c, lunaddr,
-					DEFAULT_REPLY_QUEUE);
-		if (!rc)
-			break;
-
-		dev_warn(&h->pdev->dev, "waiting %d secs "
-			"for device to become ready.\n", waittime);
+		dev_warn(&h->pdev->dev,
+			 "waiting %d secs for device to become ready.\n",
+			 waittime);
 	}
+
+	return rc;
+}
+
+static int wait_for_device_to_become_ready(struct ctlr_info *h,
+	unsigned char lunaddr[])
+{
+	int rc;
+	struct CommandList *c;
+
+	c = cmd_alloc(h);
+
+	rc = hpsa_wait_for_test_unit_ready(h, c, lunaddr, DEFAULT_REPLY_QUEUE);
 
 	if (rc)
 		dev_warn(&h->pdev->dev, "giving up on device.\n");
