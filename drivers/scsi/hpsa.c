@@ -1161,6 +1161,8 @@ lun_assigned:
 
 	h->dev[n] = device;
 	h->ndevices++;
+	device->offload_to_be_enabled = device->offload_enabled;
+	device->offload_enabled = 0;
 	added[*nadded] = device;
 	(*nadded)++;
 
@@ -1200,11 +1202,17 @@ static void hpsa_scsi_update_entry(struct ctlr_info *h, int hostno,
 		 */
 		h->dev[entry]->raid_map = new_entry->raid_map;
 		h->dev[entry]->ioaccel_handle = new_entry->ioaccel_handle;
-		wmb(); /* ensure raid map updated prior to ->offload_enabled */
 	}
 	h->dev[entry]->offload_config = new_entry->offload_config;
 	h->dev[entry]->offload_to_mirror = new_entry->offload_to_mirror;
-	h->dev[entry]->offload_enabled = new_entry->offload_enabled;
+
+	/* We can turn off ioaccel offload now, but need to delay turning
+	 * it on until we can update h->dev[entry]->phys_disk[], but we
+	 * can't do that until all the devices are updated.
+	 */
+	h->dev[entry]->offload_to_be_enabled = new_entry->offload_enabled;
+	if (!new_entry->offload_enabled)
+		h->dev[entry]->offload_enabled = 0;
 
 	dev_info(&h->pdev->dev,
 		"updated scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
@@ -1239,6 +1247,8 @@ static void hpsa_scsi_replace_entry(struct ctlr_info *h, int hostno,
 		new_entry->lun = h->dev[entry]->lun;
 	}
 
+	new_entry->offload_to_be_enabled = new_entry->offload_enabled;
+	new_entry->offload_enabled = 0;
 	h->dev[entry] = new_entry;
 	added[*nadded] = new_entry;
 	(*nadded)++;
@@ -1659,6 +1669,14 @@ static void adjust_hpsa_scsi_table(struct ctlr_info *h, int hostno,
 			/* but if it does happen, we just ignore that device */
 		}
 	}
+	hpsa_update_log_drive_phys_drive_ptrs(h, h->dev, h->ndevices);
+
+	/* Now that h->dev[]->phys_disk[] is coherent, we can enable
+	 * any logical drives that need it enabled.
+	 */
+	for (i = 0; i < h->ndevices; i++)
+		h->dev[i]->offload_enabled = h->dev[i]->offload_to_be_enabled;
+
 	spin_unlock_irqrestore(&h->devlock, flags);
 
 	/* Monitor devices which are in one of several NOT READY states to be
@@ -2773,6 +2791,7 @@ static void hpsa_get_ioaccel_status(struct ctlr_info *h,
 
 	this_device->offload_config = 0;
 	this_device->offload_enabled = 0;
+	this_device->offload_to_be_enabled = 0;
 
 	buf = kzalloc(64, GFP_KERNEL);
 	if (!buf)
@@ -2796,6 +2815,7 @@ static void hpsa_get_ioaccel_status(struct ctlr_info *h,
 		if (hpsa_get_raid_map(h, scsi3addr, this_device))
 			this_device->offload_enabled = 0;
 	}
+	this_device->offload_to_be_enabled = this_device->offload_enabled;
 out:
 	kfree(buf);
 	return;
@@ -3100,6 +3120,7 @@ static int hpsa_update_device_info(struct ctlr_info *h,
 		this_device->raid_level = RAID_UNKNOWN;
 		this_device->offload_config = 0;
 		this_device->offload_enabled = 0;
+		this_device->offload_to_be_enabled = 0;
 		this_device->volume_offline = 0;
 	}
 
@@ -3588,7 +3609,6 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 		if (ncurrent >= HPSA_MAX_DEVICES)
 			break;
 	}
-	hpsa_update_log_drive_phys_drive_ptrs(h, currentsd, ncurrent);
 	adjust_hpsa_scsi_table(h, hostno, currentsd, ncurrent);
 out:
 	kfree(tmpdevice);
