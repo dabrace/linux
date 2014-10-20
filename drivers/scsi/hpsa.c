@@ -5212,11 +5212,18 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	/* Find the controller of the command to be aborted */
 	h = sdev_to_hba(sc->device);
 	if (WARN(h == NULL,
-			"ABORT REQUEST FAILED, Controller lookup failed.\n"))
+			"scsi ?:?:?:? scmd %p ABORT FAILED, Controller lookup failed.\n",
+			sc))
 		return FAILED;
 
-	if (lockup_detected(h))
+	/* if controller locked up, we can guarantee command won't complete */
+	if (lockup_detected(h)) {
+		dev_warn(&h->pdev->dev,
+			"scsi %d:%d:%d:%d scmd %p ABORT FAILED, lockup detected\n",
+			h->scsi_host->host_no, sc->device->channel,
+			sc->device->id, sc->device->lun, sc);
 		return FAILED;
+	}
 
 	/* Check that controller supports some kind of task abort */
 	if (!(HPSATMF_PHYS_TASK_ABORT & h->TMFSupportFlags) &&
@@ -5224,9 +5231,9 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		return FAILED;
 
 	memset(msg, 0, sizeof(msg));
-	ml += sprintf(msg+ml, "Aborting command on scsi %d:%d:%d:%llu ",
+	ml += sprintf(msg+ml, "scsi %d:%d:%d:%llu scmd %p ABORT ",
 		h->scsi_host->host_no, sc->device->channel,
-		sc->device->id, sc->device->lun);
+		sc->device->id, sc->device->lun, sc);
 
 	/* Find the device of the command to be aborted */
 	dev = sc->device->hostdata;
@@ -5268,11 +5275,12 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	ml += sprintf(msg+ml, "Tag:0x%08x:%08x ", tagupper, taglower);
 	as  = abort->scsi_cmd;
 	if (as != NULL)
-		ml += sprintf(msg+ml, "Command:0x%x SN:0x%lx ",
-			as->cmnd[0], as->serial_number);
-	dev_dbg(&h->pdev->dev, "%s\n", msg);
-	dev_warn(&h->pdev->dev, "Aborting command on scsi %d:%d:%d:%d\n",
-		h->scsi_host->host_no, dev->bus, dev->target, dev->lun);
+		ml += sprintf(msg+ml,
+			"CDBLen: %d CDB: 0x%02x%02x... SN: 0x%lx ",
+			as->cmd_len, as->cmnd[0], as->cmnd[1],
+			as->serial_number);
+	dev_warn(&h->pdev->dev, "%s BEING SENT\n", msg);
+
 	/*
 	 * Command is in flight, or possibly already completed
 	 * by the firmware (but not to the scsi mid layer) but we can't
@@ -5280,7 +5288,8 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	 */
 	if (wait_for_available_abort_cmd(h)) {
 		dev_warn(&h->pdev->dev,
-			"Timed out waiting for an abort command to become available.\n");
+			"%s FAILED, timeout waiting for an abort command to become available.\n",
+			msg);
 		cmd_free(h, abort);
 		return FAILED;
 	}
@@ -5288,13 +5297,11 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	atomic_inc(&h->abort_cmds_available);
 	wake_up_all(&h->abort_cmd_wait_queue);
 	if (rc != 0) {
-		dev_warn(&h->pdev->dev, "FAILED abort command on scsi %d:%d:%d:%d\n",
-			h->scsi_host->host_no,
-			dev->bus, dev->target, dev->lun);
+		dev_warn(&h->pdev->dev, "%s SENT, FAILED\n", msg);
 		cmd_free(h, abort);
 		return FAILED;
 	}
-	dev_info(&h->pdev->dev, "%s REQUEST SUCCEEDED.\n", msg);
+	dev_info(&h->pdev->dev, "%s SENT, SUCCESS\n", msg);
 	cmd_free(h, abort);
 	return SUCCESS;
 }
