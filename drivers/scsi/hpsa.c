@@ -1083,9 +1083,21 @@ static void __enqueue_cmd_and_start_io(struct ctlr_info *h,
 	}
 }
 
-static void enqueue_cmd_and_start_io(struct ctlr_info *h,
-					struct CommandList *c)
+static void hpsa_mark_as_aborted(struct CommandList *c)
 {
+	struct ErrorInfo *ei = c->err_info;
+
+	ei->CommandStatus = CMD_ABORTED;
+}
+
+static void enqueue_cmd_and_start_io(struct ctlr_info *h, struct CommandList *c)
+{
+	if (unlikely(c->abort_pending)) {
+		hpsa_mark_as_aborted(c);
+		finish_cmd(c);
+		return;
+	}
+
 	__enqueue_cmd_and_start_io(h, c, DEFAULT_REPLY_QUEUE);
 }
 
@@ -2144,6 +2156,11 @@ static void hpsa_retry_cmd(struct ctlr_info *h, struct CommandList *c)
 	queue_work_on(raw_smp_processor_id(), h->resubmit_wq, &c->work);
 }
 
+static void hpsa_set_scsi_cmd_aborted(struct scsi_cmnd *cmd)
+{
+	cmd->result = DID_ABORT << 16;
+}
+
 static void process_ioaccel2_completion(struct ctlr_info *h,
 		struct CommandList *c, struct scsi_cmnd *cmd,
 		struct hpsa_scsi_dev_t *dev)
@@ -2156,6 +2173,12 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 	if (likely(c2->error_data.serv_response == 0 &&
 			c2->error_data.status == 0))
 		return hpsa_cmd_free_and_done(h, c, cmd);
+
+	/* don't requeue a command which is being aborted */
+	if (unlikely(c->abort_pending)) {
+		hpsa_set_scsi_cmd_aborted(cmd);
+		return hpsa_cmd_free_and_done(h, c, cmd);
+	}
 
 	/* Any RAID offload error results in retry which will use
 	 * the normal I/O path so the controller can handle whatever's
@@ -2274,9 +2297,13 @@ static void complete_scsi_command(struct CommandList *cp)
 		if (is_logical_dev_addr_mode(dev->scsi3addr)) {
 			if (ei->CommandStatus == CMD_IOACCEL_DISABLED)
 				dev->offload_enabled = 0;
-			return hpsa_retry_cmd(h, cp);
+			if (!cp->abort_pending)
+				return hpsa_retry_cmd(h, cp);
 		}
 	}
+
+	if (cp->abort_pending)
+		hpsa_mark_as_aborted(cp);
 
 	/* an error has occurred */
 	switch (ei->CommandStatus) {
@@ -2365,7 +2392,7 @@ static void complete_scsi_command(struct CommandList *cp)
 			cp->Request.CDB);
 		break;
 	case CMD_ABORTED:
-		cmd->result = DID_ABORT << 16;
+		hpsa_set_scsi_cmd_aborted(cmd);
 		dev_warn(&h->pdev->dev, "CDB %16phN was aborted with status 0x%x\n",
 				cp->Request.CDB, ei->ScsiStatus);
 		break;
@@ -4732,6 +4759,10 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 		cmd->result = DID_NO_CONNECT << 16;
 		return hpsa_cmd_free_and_done(c->h, c, cmd);
 	}
+	if (c->abort_pending) {
+		hpsa_set_scsi_cmd_aborted(cmd);
+		return hpsa_cmd_free_and_done(c->h, c, cmd);
+	}
 	if (c->cmd_type == CMD_IOACCEL2) {
 		struct ctlr_info *h = c->h;
 		struct io_accel2_cmd *c2 = &h->ioaccel2_cmd_pool[c->cmdindex];
@@ -5462,6 +5493,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		return SUCCESS;
 	}
 
+	abort->abort_pending = true;
 	hpsa_get_tag(h, abort, &taglower, &tagupper);
 	reply_queue = hpsa_extract_reply_queue(h, abort);
 	ml += sprintf(msg+ml, "Tag:0x%08x:%08x ", tagupper, taglower);

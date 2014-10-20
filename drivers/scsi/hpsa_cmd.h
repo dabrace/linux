@@ -438,6 +438,8 @@ struct CommandList {
 	 * not used.
 	 */
 	struct hpsa_scsi_dev_t *phys_disk;
+
+	int abort_pending;
 	atomic_t refcount; /* Must be last to avoid memset in cmd_alloc */
 } __aligned(COMMANDLIST_ALIGNMENT);
 
