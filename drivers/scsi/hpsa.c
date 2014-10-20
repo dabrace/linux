@@ -6924,7 +6924,7 @@ static int hpsa_pci_init(struct ctlr_info *h)
 
 	err = pci_enable_device(h->pdev);
 	if (err) {
-		dev_warn(&h->pdev->dev, "unable to enable PCI device\n");
+		dev_err(&h->pdev->dev, "failed to enable PCI device\n");
 		return err;
 	}
 
@@ -6949,34 +6949,31 @@ static int hpsa_pci_init(struct ctlr_info *h)
 	}
 	err = hpsa_wait_for_board_state(h->pdev, h->vaddr, BOARD_READY);
 	if (err)
-		goto err_out_free_res;
+		goto clean3;	/* vaddr, intmode+region, pci */
 	err = hpsa_find_cfgtables(h);
 	if (err)
-		goto err_out_free_res;
+		goto clean3;	/* vaddr, intmode+region, pci */
 	hpsa_find_board_params(h);
 
 	if (!hpsa_CISS_signature_present(h)) {
 		err = -ENODEV;
-		goto err_out_free_res;
+		goto clean4;	/* cfgtables, vaddr, intmode+region, pci */
 	}
 	hpsa_set_driver_support_bits(h);
 	hpsa_p600_dma_prefetch_quirk(h);
 	err = hpsa_enter_simple_mode(h);
 	if (err)
-		goto err_out_free_res;
+		goto clean4;	/* cfgtables, vaddr, intmode+region, pci */
 	return 0;
 
-err_out_free_res:
-	if (h->transtable)
-		iounmap(h->transtable);
-	if (h->cfgtable)
-		iounmap(h->cfgtable);
-	if (h->vaddr)
-		iounmap(h->vaddr);
-clean2:
+clean4:	/* cfgtables, vaddr, intmode+region, pci */
+	hpsa_free_cfgtables(h);
+clean3:	/* vaddr, intmode+region, pci */
+	iounmap(h->vaddr);
+clean2:	/* intmode+region, pci */
 	hpsa_disable_interrupt_mode(h);
 	pci_release_regions(h->pdev);
-clean1:
+clean1:	/* pci */
 	pci_disable_device(h->pdev);
 	return err;
 }
@@ -7511,7 +7508,7 @@ reinit_after_soft_reset:
 			dac = 0;
 		} else {
 			dev_err(&pdev->dev, "no suitable DMA available\n");
-			goto clean1;
+			goto clean2;
 		}
 	}
 
@@ -7622,6 +7619,7 @@ clean4:
 clean2_and_free_irqs:
 	hpsa_free_irqs(h);
 clean2:
+	hpsa_free_pci_init(h);
 clean1:
 	if (h->resubmit_wq)
 		destroy_workqueue(h->resubmit_wq);
