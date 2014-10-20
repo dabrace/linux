@@ -5589,26 +5589,47 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 }
 
 /*
+ * The block layer has already gone to the trouble of picking out a unique,
+ * small-integer tag for this request.  We use an offset from that value as
+ * an index to select our command block.  (The offset allows us to reserve
+ * the low-numbered entries for our own uses.)
+ */
+static int hpsa_get_cmd_index(struct scsi_cmnd *scmd)
+{
+	struct scsi_device *dev = scmd->device;
+	int idx = scmd->request->tag;
+
+	if (idx < 0) {
+		dev_err(&dev->sdev_dev , "Invalid block tag: %d\n", idx);
+		/* This value comes from an upper layer...it's not our bug. */
+		BUG_ON(idx < 0);
+	}
+
+	/* Offset to leave space for internal cmds. */
+	idx += HPSA_NRESERVED_CMDS;
+
+	return idx;
+}
+
+/*
  * For operations with an associated SCSI command, a command block is allocated
  * at init, and managed by cmd_tagged_alloc() and cmd_tagged_free() using the
  * block request tag as an index into a table of entries.  cmd_tagged_free() is
  * the complement, although cmd_free() may be called instead.
- *
- * The block layer has already gone to the trouble of picking out a unique,
- * small-integer tag for this request, and it was squirreled away in the SCSI
- * command.  We use that value as an index to select our command block.
  */
 static struct CommandList *cmd_tagged_alloc(struct ctlr_info *h,
 					    struct scsi_cmnd *scmd)
 {
-	int idx = scmd->request->tag;
+	int idx = hpsa_get_cmd_index(scmd);
 	struct CommandList *c = h->cmd_pool + idx;
 	int refcount = 0;
 
-	if (idx < HPSA_NRESERVED_CMDS || idx > h->nr_cmds) {
+	if (idx < HPSA_NRESERVED_CMDS || idx >= h->nr_cmds) {
 		dev_err(&h->pdev->dev, "Bad block tag: %d\n", idx);
-		/* This value comes from the block layer...it's not our bug. */
-		BUG_ON(idx < HPSA_NRESERVED_CMDS || idx > h->nr_cmds);
+		/* The index value comes from the block layer, so if it's out of
+		 * bounds, it's probably not our bug.
+		 */
+		BUG_ON(idx < HPSA_NRESERVED_CMDS || idx >= h->nr_cmds);
 	}
 
 	refcount = atomic_inc_return(&c->refcount);
