@@ -5660,7 +5660,6 @@ static struct CommandList *cmd_alloc(struct ctlr_info *h)
 {
 	struct CommandList *c;
 	int refcount, i;
-	unsigned long offset;
 
 	/* There is some *extremely* small but non-zero chance that that
 	 * multiple threads could get in here, and one thread could
@@ -5673,32 +5672,27 @@ static struct CommandList *cmd_alloc(struct ctlr_info *h)
 	 * infrequently as to be indistinguishable from never.
 	 *
 	 * Note that we start allocating commands before the SCSI host structure
-	 * is initialized.  Since the last allocation starts out as zero, this
+	 * is initialized.  Since the search starts at bit zero, this
 	 * all works, since we have at least one command structure available;
 	 * however, it means that the structures with the low indexes have to be
 	 * reserved for driver-initiated requests, while requests from the block
 	 * layer will use the higher indexes.
 	 */
 
-	offset = h->last_allocation; /* benighly racy */
 	for (;;) {
-		i = find_next_zero_bit(h->cmd_pool_bits, h->nr_cmds, offset);
-		if (unlikely(i >= h->reserved_cmds)) {
-			offset = 0;
+		i = find_first_zero_bit(h->cmd_pool_bits, h->reserved_cmds);
+		if (unlikely(i >= h->reserved_cmds))
 			continue;
-		}
 		c = h->cmd_pool + i;
 		refcount = atomic_inc_return(&c->refcount);
 		if (unlikely(refcount > 1)) {
 			cmd_free(h, c); /* already in use */
-			offset = (i + 1) % h->nr_cmds;
 			continue;
 		}
 		set_bit(i & (BITS_PER_LONG - 1),
 			h->cmd_pool_bits + (i / BITS_PER_LONG));
 		break; /* it's ours now. */
 	}
-	h->last_allocation = i; /* benignly racy */
 	hpsa_cmd_partial_init(h, i, c);
 	return c;
 }
