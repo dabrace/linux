@@ -1138,7 +1138,8 @@ lun_assigned:
 	(*nadded)++;
 
 	dev_info(&h->pdev->dev,
-		"added scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+		"%6s scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d\n",
+		device->expose_state & HPSA_SCSI_ADD ? "added" : "masked",
 		hostno, device->bus, device->target, device->lun,
 		scsi_device_type(device->devtype),
 		device->vendor,
