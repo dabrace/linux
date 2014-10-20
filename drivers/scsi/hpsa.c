@@ -7702,13 +7702,11 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	spin_unlock_irqrestore(&h->lock, flags);
 	hpsa_unregister_scsi(h);	/* unhook from SCSI subsystem */
 
-	/* includes hpsa_free_irqs and hpsa_disable_interrupt_mode */
+	/* includes hpsa_free_irqs */
+	/* includes hpsa_disable_interrupt_mode - pci_init 2 */
 	hpsa_shutdown(pdev);
 
 	destroy_workqueue(h->resubmit_wq);
-	iounmap(h->vaddr);
-	iounmap(h->transtable);
-	iounmap(h->cfgtable);
 	hpsa_free_device_info(h);
 	hpsa_free_sg_chain_blocks(h);
 	hpsa_free_ioaccel2_sg_chain_blocks(h);
@@ -7724,8 +7722,10 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	kfree(h->ioaccel1_blockFetchTable);
 	kfree(h->ioaccel2_blockFetchTable);
 	kfree(h->hba_inquiry_data);
-	pci_disable_device(pdev);
-	pci_release_regions(pdev);
+
+	/* includes hpsa_disable_interrupt_mode - pci_init 2 */
+	hpsa_free_pci_init(h);
+
 	free_percpu(h->lockup_detected);
 	kfree(h);
 }
