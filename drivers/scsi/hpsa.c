@@ -2062,6 +2062,8 @@ static void complete_scsi_command(struct CommandList *cp)
 
 	scsi_set_resid(cmd, ei->ResidualCnt);
 	if (ei->CommandStatus == 0) {
+		if (cp->cmd_type == CMD_IOACCEL1)
+			atomic_dec(&cp->phys_disk->ioaccel_cmds_out);
 		cmd_free(h, cp);
 		cmd->scsi_done(cmd);
 		return;
