@@ -2134,8 +2134,21 @@ static int handle_ioaccel_mode2_error(struct ctlr_info *h,
 static void hpsa_cmd_free_and_done(struct ctlr_info *h,
 		struct CommandList *c, struct scsi_cmnd *cmd)
 {
-	/* FIXME: should we clear c->scsi_cmd here?
-	 * E.g., instead of doing it in complete_scsi_command() */
+	/* Prevent the following race in the abort handler:
+	 *
+	 * 1. LLD is requested to abort a SCSI command
+	 * 2. The SCSI command completes
+	 * 3. The struct CommandList associated with step 2 is made available
+	 * 4. New I/O request to LLD to another LUN re-uses struct CommandList
+	 * 5. Abort handler follows scsi_cmnd->host_scribble and
+	 *    finds struct CommandList and tries to aborts it
+	 * Now we have aborted the wrong command.
+	 *
+	 * Clear c->scsi_cmd here so that if this command gets re-used, the
+	 * abort handler will know it's a different scsi_cmnd.
+	 */
+	c->scsi_cmd = NULL;
+
 	cmd_free(h, c);		/* FIX-ME:  change to cmd_tagged_free(h, c) */
 	cmd->scsi_done(cmd);
 }
@@ -2422,20 +2435,6 @@ static void complete_scsi_command(struct CommandList *cp)
 		dev_warn(&h->pdev->dev, "cp %p returned unknown status %x\n",
 				cp, ei->CommandStatus);
 	}
-
-	/* Prevent the following race in the abort handler:
-	 *
-	 * 1. LLD is requested to abort a scsi command
-	 * 2. scsi command completes
-	 * 3. The struct CommandList associated with 2 is made available.
-	 * 4. new io request to LLD to another LUN re-uses struct CommandList
-	 * 5. abort handler follows scsi_cmnd->host_scribble and
-	 *    finds struct CommandList and tries to aborts it.
-	 * Now we have aborted the wrong command.
-	 * Clear cp->scsi_cmd here so that if this get re-used, the abort
-	 * handler will know it's a different scsi_cmnd.
-	 */
-	cp->scsi_cmd = NULL;
 
 	return hpsa_cmd_free_and_done(h, cp, cmd);
 }
