@@ -4687,6 +4687,7 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 	dev = cmd->device->hostdata;
 	if (!dev) {
 		cmd->result = DID_NO_CONNECT << 16;
+		cmd_free(c->h, c);
 		cmd->scsi_done(cmd);
 		return;
 	}
@@ -4705,6 +4706,9 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 				 * If we get here, it means dma mapping failed.
 				 * Try again via scsi mid layer, which will
 				 * then get SCSI_MLQUEUE_HOST_BUSY.
+				 *
+				 * hpsa_ioaccel_submit will have already freed c
+				 * if it encountered a dma mapping failure.
 				 */
 				cmd->result = DID_IMM_RETRY << 16;
 				cmd->scsi_done(cmd);
@@ -4719,6 +4723,9 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 		 * If we get here, it means dma mapping failed. Try
 		 * again via scsi mid layer, which will then get
 		 * SCSI_MLQUEUE_HOST_BUSY.
+		 *
+		 * hpsa_ciss_submit will have already freed c
+		 * if it encountered a dma mapping failure.
 		 */
 		cmd->result = DID_IMM_RETRY << 16;
 		cmd->scsi_done(cmd);
