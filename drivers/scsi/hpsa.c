@@ -1665,21 +1665,19 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 		c2->error_data.serv_response ==
 			IOACCEL2_SERV_RESPONSE_FAILURE) {
 		dev->offload_enabled = 0;
-		h->drv_req_rescan = 1;	/* schedule controller for a rescan */
 		cmd->result = DID_SOFT_ERROR << 16;
 		cmd_free(h, c);
 		cmd->scsi_done(cmd);
 		return;
 	}
 	raid_retry = handle_ioaccel_mode2_error(h, c, cmd, c2);
-	/* If error found, disable Smart Path, schedule a rescan,
-	 * and force a retry on the standard path.
+	/* If error found, disable Smart Path,
+	 * force a retry on the standard path.
 	 */
 	if (raid_retry) {
 		dev_warn(&h->pdev->dev, "%s: Retrying on standard path.\n",
 			"HP SSD Smart Path");
 		dev->offload_enabled = 0; /* Disable Smart Path */
-		h->drv_req_rescan = 1;	  /* schedule controller rescan */
 		cmd->result = DID_SOFT_ERROR << 16;
 	}
 	cmd_free(h, c);
@@ -6541,9 +6539,6 @@ static void hpsa_ack_ctlr_events(struct ctlr_info *h)
 	int i;
 	char *event_type;
 
-	/* Clear the driver-requested rescan flag */
-	h->drv_req_rescan = 0;
-
 	/* Ask the controller to clear the events we're handling. */
 	if ((h->transMethod & (CFGTBL_Trans_io_accel1
 			| CFGTBL_Trans_io_accel2)) &&
@@ -6589,9 +6584,6 @@ static void hpsa_ack_ctlr_events(struct ctlr_info *h)
  */
 static int hpsa_ctlr_needs_rescan(struct ctlr_info *h)
 {
-	if (h->drv_req_rescan)
-		return 1;
-
 	if (!(h->fw_support & MISC_FW_EVENT_NOTIFY))
 		return 0;
 
@@ -6637,7 +6629,6 @@ static void hpsa_monitor_ctlr_worker(struct work_struct *work)
 
 	if (hpsa_ctlr_needs_rescan(h) || hpsa_offline_devices_ready(h)) {
 		scsi_host_get(h->scsi_host);
-		h->drv_req_rescan = 0;
 		hpsa_ack_ctlr_events(h);
 		hpsa_scan_start(h->scsi_host);
 		scsi_host_put(h->scsi_host);
@@ -6805,7 +6796,6 @@ reinit_after_soft_reset:
 		/* Enable Accelerated IO path at driver layer */
 		h->acciopath_status = 1;
 
-	h->drv_req_rescan = 0;
 	h->lockup_detector_enabled = 1;
 
 	/* Turn the interrupts on so we can service requests */
