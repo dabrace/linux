@@ -4457,7 +4457,7 @@ static int hpsa_send_abort_both_ways(struct ctlr_info *h,
 static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 {
 
-	int i, rc;
+	int rc;
 	struct ctlr_info *h;
 	struct hpsa_scsi_dev_t *dev;
 	struct CommandList *abort; /* pointer to command to be aborted */
@@ -4526,26 +4526,8 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		return FAILED;
 	}
 	dev_info(&h->pdev->dev, "%s REQUEST SUCCEEDED.\n", msg);
-
-	/* If the abort(s) above completed and actually aborted the
-	 * command, then the command to be aborted should already be
-	 * completed.  If not, wait around a bit more to see if they
-	 * manage to complete normally.
-	 */
-#define ABORT_COMPLETE_WAIT_SECS 30
-	for (i = 0; i < ABORT_COMPLETE_WAIT_SECS * 10; i++) {
-		refcount = atomic_read(&abort->refcount);
-		if (refcount < 2) {
-			cmd_free(h, abort);
-			return SUCCESS;
-		} else {
-			msleep(100);
-		}
-	}
-	dev_warn(&h->pdev->dev, "%s FAILED. Aborted command has not completed after %d seconds.\n",
-		msg, ABORT_COMPLETE_WAIT_SECS);
 	cmd_free(h, abort);
-	return FAILED;
+	return SUCCESS;
 }
 
 /*
