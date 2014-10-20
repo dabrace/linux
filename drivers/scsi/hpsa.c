@@ -2563,7 +2563,7 @@ static int hpsa_get_device_id(struct ctlr_info *h, unsigned char *scsi3addr,
 }
 
 static int hpsa_scsi_do_report_luns(struct ctlr_info *h, int logical,
-		struct ReportLUNdata *buf, int bufsize,
+		void *buf, int bufsize,
 		int extended_response)
 {
 	int rc = IO_OK;
@@ -2595,11 +2595,12 @@ static int hpsa_scsi_do_report_luns(struct ctlr_info *h, int logical,
 		hpsa_scsi_interpret_error(h, c);
 		rc = -1;
 	} else {
-		if (buf->extended_response_flag != extended_response) {
+		struct ReportLUNdata *rld = buf;
+		if (rld->extended_response_flag != extended_response) {
 			dev_err(&h->pdev->dev,
 				"report luns requested format %u, got %u\n",
 				extended_response,
-				buf->extended_response_flag);
+				rld->extended_response_flag);
 			rc = -1;
 		}
 	}
@@ -2609,10 +2610,10 @@ out:
 }
 
 static inline int hpsa_scsi_do_report_phys_luns(struct ctlr_info *h,
-		struct ReportLUNdata *buf,
-		int bufsize, int extended_response)
+		struct ReportExtendedLUNdata *buf, int bufsize)
 {
-	return hpsa_scsi_do_report_luns(h, 0, buf, bufsize, extended_response);
+	return hpsa_scsi_do_report_luns(h, 0, buf, bufsize,
+						HPSA_REPORT_PHYS_EXTENDED);
 }
 
 static inline int hpsa_scsi_do_report_log_luns(struct ctlr_info *h,
@@ -2996,7 +2997,6 @@ static int hpsa_get_pdisk_of_ioaccel2(struct ctlr_info *h,
 {
 	struct ReportExtendedLUNdata *physicals = NULL;
 	int responsesize = 24;	/* size of physical extended response */
-	int extended = 2;	/* flag forces reporting 'other dev info'. */
 	int reportsize = sizeof(*physicals) + HPSA_MAX_PHYS_LUN * responsesize;
 	u32 nphysicals = 0;	/* number of reported physical devs */
 	int found = 0;		/* found match (1) or not (0) */
@@ -3043,8 +3043,7 @@ static int hpsa_get_pdisk_of_ioaccel2(struct ctlr_info *h,
 	physicals = kzalloc(reportsize, GFP_KERNEL);
 	if (physicals == NULL)
 		return 0;
-	if (hpsa_scsi_do_report_phys_luns(h, (struct ReportLUNdata *) physicals,
-		reportsize, extended)) {
+	if (hpsa_scsi_do_report_phys_luns(h, physicals, reportsize)) {
 		dev_err(&h->pdev->dev,
 			"Can't lookup %s device handle: report physical LUNs failed.\n",
 			"HP SSD Smart Path");
@@ -3085,34 +3084,21 @@ static int hpsa_get_pdisk_of_ioaccel2(struct ctlr_info *h,
  * Returns 0 on success, -1 otherwise.
  */
 static int hpsa_gather_lun_info(struct ctlr_info *h,
-	int reportphyslunsize, int reportloglunsize,
-	struct ReportLUNdata *physdev, u32 *nphysicals, int *physical_mode,
+	struct ReportExtendedLUNdata *physdev, u32 *nphysicals,
 	struct ReportLUNdata *logdev, u32 *nlogicals)
 {
-	int physical_entry_size = 8;
-
-	*physical_mode = 0;
-
-	/* For I/O accelerator mode we need to read physical device handles */
-	if (h->transMethod & CFGTBL_Trans_io_accel1 ||
-		h->transMethod & CFGTBL_Trans_io_accel2) {
-		*physical_mode = HPSA_REPORT_PHYS_EXTENDED;
-		physical_entry_size = 24;
-	}
-	if (hpsa_scsi_do_report_phys_luns(h, physdev, reportphyslunsize,
-							*physical_mode)) {
+	if (hpsa_scsi_do_report_phys_luns(h, physdev, sizeof(*physdev))) {
 		dev_err(&h->pdev->dev, "report physical LUNs failed.\n");
 		return -1;
 	}
-	*nphysicals = be32_to_cpu(*((__be32 *)physdev->LUNListLength)) /
-							physical_entry_size;
+	*nphysicals = be32_to_cpu(*((__be32 *)physdev->LUNListLength)) / 24;
 	if (*nphysicals > HPSA_MAX_PHYS_LUN) {
 		dev_warn(&h->pdev->dev, "maximum physical LUNs (%d) exceeded."
 			"  %d LUNs ignored.\n", HPSA_MAX_PHYS_LUN,
 			*nphysicals - HPSA_MAX_PHYS_LUN);
 		*nphysicals = HPSA_MAX_PHYS_LUN;
 	}
-	if (hpsa_scsi_do_report_log_luns(h, logdev, reportloglunsize)) {
+	if (hpsa_scsi_do_report_log_luns(h, logdev, sizeof(*logdev))) {
 		dev_err(&h->pdev->dev, "report logical LUNs failed.\n");
 		return -1;
 	}
@@ -3201,7 +3187,6 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 	struct ReportLUNdata *logdev_list = NULL;
 	u32 nphysicals = 0;
 	u32 nlogicals = 0;
-	int physical_mode = 0;
 	u32 ndev_allocated = 0;
 	struct hpsa_scsi_dev_t **currentsd, *this_device, *tmpdevice;
 	int ncurrent = 0;
@@ -3232,10 +3217,8 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 
 	h->hba_mode_enabled = rescan_hba_mode;
 
-	if (hpsa_gather_lun_info(h,
-			sizeof(*physdev_list), sizeof(*logdev_list),
-			(struct ReportLUNdata *) physdev_list, &nphysicals,
-			&physical_mode, logdev_list, &nlogicals))
+	if (hpsa_gather_lun_info(h, physdev_list, &nphysicals,
+			logdev_list, &nlogicals))
 		goto out;
 
 	/* We might see up to the maximum number of logical and physical disks
@@ -3332,7 +3315,8 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 				ncurrent++;
 				break;
 			}
-			if (physical_mode == HPSA_REPORT_PHYS_EXTENDED) {
+			if (h->transMethod & CFGTBL_Trans_io_accel1 ||
+				h->transMethod & CFGTBL_Trans_io_accel2) {
 				memcpy(&this_device->ioaccel_handle,
 					&lunaddrbytes[20],
 					sizeof(this_device->ioaccel_handle));
