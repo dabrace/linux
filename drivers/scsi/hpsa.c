@@ -4005,8 +4005,11 @@ static int hpsa_scsi_ioaccel_raid_map(struct ctlr_info *h,
 						dev->scsi3addr);
 }
 
-static int hpsa_scsi_queue_command_lck(struct scsi_cmnd *cmd,
-	void (*done)(struct scsi_cmnd *))
+/*
+ * Running in struct Scsi_Host->host_lock less mode using LLD internal
+ * struct ctlr_info *h->lock w/ spin_lock_irqsave() protection.
+ */
+static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 {
 	struct ctlr_info *h;
 	struct hpsa_scsi_dev_t *dev;
@@ -4019,14 +4022,14 @@ static int hpsa_scsi_queue_command_lck(struct scsi_cmnd *cmd,
 	dev = cmd->device->hostdata;
 	if (!dev) {
 		cmd->result = DID_NO_CONNECT << 16;
-		done(cmd);
+		cmd->scsi_done(cmd);
 		return 0;
 	}
 	memcpy(scsi3addr, dev->scsi3addr, sizeof(scsi3addr));
 
 	if (unlikely(lockup_detected(h))) {
 		cmd->result = DID_ERROR << 16;
-		done(cmd);
+		cmd->scsi_done(cmd);
 		return 0;
 	}
 	c = cmd_alloc(h);
@@ -4036,9 +4039,6 @@ static int hpsa_scsi_queue_command_lck(struct scsi_cmnd *cmd,
 	}
 
 	/* Fill in the command list header */
-
-	cmd->scsi_done = done;    /* save this for use by completion code */
-
 	/* save c in case we have to abort it  */
 	cmd->host_scribble = (unsigned char *) c;
 
@@ -4190,16 +4190,6 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 		cmd->scsi_done(cmd);
 		return 0;
 	}
->>>>>>> patched
-
-		break;
-
-	default:
-		dev_err(&h->pdev->dev, "unknown data direction: %d\n",
-			cmd->sc_data_direction);
-		BUG();
-		break;
-	}
 
 	if (hpsa_scatter_gather(h, c, cmd) < 0) { /* Fill SG list */
 		cmd_free(h, c);
@@ -4209,7 +4199,6 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 	/* the cmd'll come back via intr handler in complete_scsi_command()  */
 	return 0;
 }
->>>>>>> patched
 
 static int do_not_scan_if_controller_locked_up(struct ctlr_info *h)
 {
