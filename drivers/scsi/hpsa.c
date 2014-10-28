@@ -7669,7 +7669,7 @@ reinit_after_soft_reset:
 	set_lockup_detected_for_all_cpus(h, 0);
 
 	rc = hpsa_pci_init(h);
-	if (rc != 0)
+	if (rc)
 		goto clean2;	/* lockup, wq/aer/h */
 
 	sprintf(h->devname, HPSA "%d", number_of_controllers);
