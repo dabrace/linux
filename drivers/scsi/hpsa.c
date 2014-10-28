@@ -1086,12 +1086,22 @@ static void hpsa_scsi_update_entry(struct ctlr_info *h, int hostno,
 	/* Raid level changed. */
 	h->dev[entry]->raid_level = new_entry->raid_level;
 
-	/* Raid offload parameters changed. */
+	/* Raid offload parameters changed.  Careful about the ordering. */
+	if (new_entry->offload_config && new_entry->offload_enabled) {
+		/* if drive is newly offload_enabled, we want to copy the
+		 * raid map data first.  If previously offload_enabled and
+		 * offload_config were set, raid map data had better be
+		 * the same as it was before.  if raid map data is changed
+		 * then it had better be the case that
+		 * h->dev[entry]->offload_enabled is currently 0.
+		 */
+		h->dev[entry]->raid_map = new_entry->raid_map;
+		h->dev[entry]->ioaccel_handle = new_entry->ioaccel_handle;
+		wmb(); /* ensure raid map updated prior to ->offload_enabled */
+	}
 	h->dev[entry]->offload_config = new_entry->offload_config;
-	h->dev[entry]->offload_enabled = new_entry->offload_enabled;
-	h->dev[entry]->ioaccel_handle = new_entry->ioaccel_handle;
 	h->dev[entry]->offload_to_mirror = new_entry->offload_to_mirror;
-	h->dev[entry]->raid_map = new_entry->raid_map;
+	h->dev[entry]->offload_enabled = new_entry->offload_enabled;
 
 	dev_info(&h->pdev->dev, "%s device c%db%dt%dl%d updated.\n",
 		scsi_device_type(new_entry->devtype), hostno, new_entry->bus,
