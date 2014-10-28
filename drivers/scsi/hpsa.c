@@ -7014,17 +7014,18 @@ static int hpsa_pci_init(struct ctlr_info *h)
 	err = pci_request_regions(h->pdev, HPSA);
 	if (err) {
 		dev_err(&h->pdev->dev,
-			"cannot obtain PCI resources, aborting\n");
-		return err;
+			"failed to obtain PCI resources\n");
+		goto clean1;	/* pci */
 	}
 	hpsa_interrupt_mode(h);
 	err = hpsa_pci_find_memory_BAR(h->pdev, &h->paddr);
 	if (err)
-		goto err_out_free_res;
+		goto clean2;	/* intmode+region, pci */
 	h->vaddr = remap_pci_mem(h->paddr, 0x250);
 	if (!h->vaddr) {
+		dev_err(&h->pdev->dev, "failed to remap PCI mem\n");
 		err = -ENOMEM;
-		goto err_out_free_res;
+		goto clean2;	/* intmode+region, pci */
 	}
 	err = hpsa_wait_for_board_state(h->pdev, h->vaddr, BOARD_READY);
 	if (err)
@@ -7052,8 +7053,11 @@ err_out_free_res:
 		iounmap(h->cfgtable);
 	if (h->vaddr)
 		iounmap(h->vaddr);
-	pci_disable_device(h->pdev);
+clean2:
+	hpsa_disable_interrupt_mode(h);
 	pci_release_regions(h->pdev);
+clean1:
+	pci_disable_device(h->pdev);
 	return err;
 }
 
