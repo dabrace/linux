@@ -7073,8 +7073,8 @@ reinit_after_soft_reset:
 		rc = hpsa_request_irq(h, hpsa_msix_discard_completions,
 					hpsa_intx_discard_completions);
 		if (rc) {
-			dev_warn(&h->pdev->dev, "Failed to request_irq after "
-				"soft reset.\n");
+			dev_warn(&h->pdev->dev,
+				"Failed to request_irq after soft reset.\n");
 			goto clean4;
 		}
 
