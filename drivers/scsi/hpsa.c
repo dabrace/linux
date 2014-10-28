@@ -7650,19 +7650,19 @@ reinit_after_soft_reset:
 	if (!h->resubmit_wq) {
 		dev_warn(&h->pdev->dev, "Failed to allocate work queue\n");
 		rc = -ENOMEM;
-		goto clean1;
+		goto clean1;	/* aer/h */
 	}
 	/* Allocate and clear per-cpu variable lockup_detected */
 	h->lockup_detected = alloc_percpu(u32);
 	if (!h->lockup_detected) {
 		rc = -ENOMEM;
-		goto clean1;
+		goto clean1;	/* wq/aer/h */
 	}
 	set_lockup_detected_for_all_cpus(h, 0);
 
 	rc = hpsa_pci_init(h);
 	if (rc != 0)
-		goto clean1;
+		goto clean2;	/* lockup, wq/aer/h */
 
 	sprintf(h->devname, HPSA "%d", number_of_controllers);
 	h->ctlr = number_of_controllers;
@@ -7678,23 +7678,25 @@ reinit_after_soft_reset:
 			dac = 0;
 		} else {
 			dev_err(&pdev->dev, "no suitable DMA available\n");
-			goto clean2;
+			goto clean3;	/* pci, lockup, wq/aer/h */
 		}
 	}
 
 	/* make sure the board interrupts are off */
 	h->access.set_intr_mask(h, HPSA_INTR_OFF);
 
-	if (hpsa_request_irqs(h, do_hpsa_intr_msi, do_hpsa_intr_intx))
-		goto clean2;
+	rc = hpsa_request_irqs(h, do_hpsa_intr_msi, do_hpsa_intr_intx);
+	if (rc)
+		goto clean3;	/* pci, lockup, wq/aer/h */
 	dev_info(&pdev->dev, "%s: <0x%x> at IRQ %d%s using DAC\n",
 	       h->devname, pdev->device,
 	       h->intr[h->intr_mode], dac ? "" : " not");
 	rc = hpsa_alloc_cmd_pool(h);
 	if (rc)
-		goto clean2_and_free_irqs;
-	if (hpsa_allocate_sg_chain_blocks(h))
-		goto clean4;
+		goto clean4;	/* irq, pci, lockup, wq/aer/h */
+	rc = hpsa_allocate_sg_chain_blocks(h);
+	if (rc)
+		goto clean5;	/* cmd, irq, pci, lockup, wq/aer/h */
 	init_waitqueue_head(&h->scan_wait_queue);
 	init_waitqueue_head(&h->abort_cmd_wait_queue);
 	h->scan_finished = 1; /* no scan currently in progress */
@@ -7704,7 +7706,9 @@ reinit_after_soft_reset:
 	h->hba_mode_enabled = 0;
 	h->scsi_host = NULL;
 	spin_lock_init(&h->devlock);
-	hpsa_put_ctlr_into_performant_mode(h);
+	rc = hpsa_put_ctlr_into_performant_mode(h);
+	if (rc)
+		goto clean6;	/* sg, cmd, irq, pci, lockup, wq/aer/h */
 
 	/* At this point, the controller is ready to take commands.
 	 * Now, if reset_devices and the hard reset didn't work, try
@@ -7783,20 +7787,20 @@ reinit_after_soft_reset:
 				h->heartbeat_sample_interval);
 	return 0;
 
-clean4:
-	hpsa_free_sg_chain_blocks(h);
+clean6: /* sg, cmd, irq, pci, lockup, wq/aer/h */	hpsa_free_sg_chain_blocks(h);
+clean5: /* cmd, irq, pci, lockup, wq/aer/h */
 	hpsa_free_cmd_pool(h);
-	hpsa_free_ioaccel1_cmd_and_bft(h);
-	hpsa_free_ioaccel2_cmd_and_bft(h);
-clean2_and_free_irqs:
+clean4: /* irq, pci, lockup, wq/aer/h */
 	hpsa_free_irqs(h);
-clean2:
+clean3: /* pci, lockup, wq/aer/h */
 	hpsa_free_pci_init(h);
-clean1:
-	if (h->resubmit_wq)
-		destroy_workqueue(h->resubmit_wq);
+clean2: /* lockup, wq/aer/h */
 	if (h->lockup_detected)
 		free_percpu(h->lockup_detected);
+clean1:	/* wq/aer/h */
+	if (h->resubmit_wq)
+		destroy_workqueue(h->resubmit_wq);
+	/* pci_disable_pcie_error_reporting(pdev); */
 	kfree(h);
 	return rc;
 }
