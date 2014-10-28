@@ -2068,9 +2068,6 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 {
 	struct io_accel2_cmd *c2 = &h->ioaccel2_cmd_pool[c->cmdindex];
 
-	if (c2->sg[0].chain_indicator == IOACCEL2_CHAIN)
-		hpsa_unmap_ioaccel2_sg_chain_block(h, c2);
-
 	atomic_dec(&c->phys_disk->ioaccel_cmds_out);
 
 	/* check for good status */
@@ -2139,6 +2136,7 @@ static void complete_scsi_command(struct CommandList *cp)
 	struct ctlr_info *h;
 	struct ErrorInfo *ei;
 	struct hpsa_scsi_dev_t *dev;
+	struct io_accel2_cmd *c2;
 
 	int sense_key;
 	int asc;      /* additional sense code */
@@ -2149,11 +2147,16 @@ static void complete_scsi_command(struct CommandList *cp)
 	cmd = cp->scsi_cmd;
 	h = cp->h;
 	dev = cmd->device->hostdata;
+	c2 = &h->ioaccel2_cmd_pool[cp->cmdindex];
 
 	scsi_dma_unmap(cmd); /* undo the DMA mappings */
 	if ((cp->cmd_type == CMD_SCSI) &&
 		(cp->Header.SGTotal > h->max_cmd_sg_entries))
 		hpsa_unmap_sg_chain_block(h, cp);
+
+	if ((cp->cmd_type == CMD_IOACCEL2) &&
+		(c2->sg[0].chain_indicator == IOACCEL2_CHAIN))
+		hpsa_unmap_ioaccel2_sg_chain_block(h, c2);
 
 	cmd->result = (DID_OK << 16); 		/* host byte */
 	cmd->result |= (COMMAND_COMPLETE << 8);	/* msg byte */
