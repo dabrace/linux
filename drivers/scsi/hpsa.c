@@ -2172,6 +2172,7 @@ static void hpsa_cmd_abort_and_free(struct ctlr_info *h, struct CommandList *c,
 			 c->Request.CDB, c->err_info->ScsiStatus);
 	c->scsi_cmd = NULL;
 	cmd_free(h, c);		/* FIX-ME:  change to cmd_tagged_free(h, c) */
+	wake_up_all(&h->abort_sync_wait_queue);
 }
 
 static void process_ioaccel2_completion(struct ctlr_info *h,
@@ -5597,6 +5598,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		return FAILED;
 	}
 	dev_info(&h->pdev->dev, "%s SENT, SUCCESS\n", msg);
+	wait_event(h->abort_sync_wait_queue, atomic_read(&abort->refcount) == 1);
 	cmd_free(h, abort);
 	return SUCCESS;
 }
@@ -7924,6 +7926,7 @@ reinit_after_soft_reset:
 		goto clean5;	/* cmd, irq, pci, lockup, wq/aer/h */
 	init_waitqueue_head(&h->scan_wait_queue);
 	init_waitqueue_head(&h->abort_cmd_wait_queue);
+	init_waitqueue_head(&h->abort_sync_wait_queue);
 	h->scan_finished = 1; /* no scan currently in progress */
 
 	pci_set_drvdata(pdev, h);
