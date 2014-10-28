@@ -7173,10 +7173,13 @@ static int hpsa_alloc_cmd_pool(struct ctlr_info *h)
 	    || (h->cmd_pool == NULL)
 	    || (h->errinfo_pool == NULL)) {
 		dev_err(&h->pdev->dev, "out of memory in %s", __func__);
-		return -ENOMEM;
+		goto clean_up;
 	}
 	hpsa_preinitialize_commands(h);
 	return 0;
+clean_up:
+	hpsa_free_cmd_pool(h);
+	return -ENOMEM;
 }
 
 static void hpsa_irq_affinity_hints(struct ctlr_info *h)
