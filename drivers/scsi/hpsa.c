@@ -6547,7 +6547,7 @@ static int hpsa_kdump_hard_reset_controller(struct pci_dev *pdev)
 	rc = hpsa_wait_for_board_state(pdev, vaddr, BOARD_READY);
 	if (rc) {
 		dev_warn(&pdev->dev,
-			"failed waiting for board to become ready "
+			"Failed waiting for board to become ready "
 			"after hard reset\n");
 		goto unmap_cfgtable;
 	}
@@ -6658,7 +6658,7 @@ static void hpsa_disable_interrupt_mode(struct ctlr_info *h)
 }
 
 /* If MSI/MSI-X is supported by the kernel we will try to enable it on
- * controllers that are capable. If not, we use IO-APIC mode.
+ * controllers that are capable. If not, we use legacy INTx mode.
  */
 static void hpsa_interrupt_mode(struct ctlr_info *h)
 {
@@ -6676,7 +6676,7 @@ static void hpsa_interrupt_mode(struct ctlr_info *h)
 	    (h->board_id == 0x40820E11) || (h->board_id == 0x40830E11))
 		goto default_int_mode;
 	if (pci_find_capability(h->pdev, PCI_CAP_ID_MSIX)) {
-		dev_info(&h->pdev->dev, "MSIX\n");
+		dev_info(&h->pdev->dev, "MSI-X capable controller\n");
 		h->msix_vector = MAX_REPLY_QUEUES;
 		if (h->msix_vector > num_online_cpus())
 			h->msix_vector = num_online_cpus();
@@ -6697,7 +6697,7 @@ static void hpsa_interrupt_mode(struct ctlr_info *h)
 	}
 single_msi_mode:
 	if (pci_find_capability(h->pdev, PCI_CAP_ID_MSI)) {
-		dev_info(&h->pdev->dev, "MSI\n");
+		dev_info(&h->pdev->dev, "MSI capable controller\n");
 		if (!pci_enable_msi(h->pdev))
 			h->msi_vector = 1;
 		else
@@ -6871,7 +6871,7 @@ static void hpsa_find_board_params(struct ctlr_info *h)
 static inline bool hpsa_CISS_signature_present(struct ctlr_info *h)
 {
 	if (!check_signature(h->cfgtable->Signature, "CISS", 4)) {
-		dev_warn(&h->pdev->dev, "not a valid CISS config table\n");
+		dev_err(&h->pdev->dev, "not a valid CISS config table\n");
 		return false;
 	}
 	return true;
@@ -6963,7 +6963,7 @@ static int hpsa_enter_simple_mode(struct ctlr_info *h)
 	h->transMethod = CFGTBL_Trans_Simple;
 	return 0;
 error:
-	dev_warn(&h->pdev->dev, "unable to get board into simple mode\n");
+	dev_err(&h->pdev->dev, "failed to enter simple mode\n");
 	return -ENODEV;
 }
 
@@ -8037,8 +8037,8 @@ static void hpsa_enter_performant_mode(struct ctlr_info *h, u32 trans_support)
 	print_cfg_table(&h->pdev->dev, h->cfgtable);
 	register_value = readl(&(h->cfgtable->TransportActive));
 	if (!(register_value & CFGTBL_Trans_Performant)) {
-		dev_warn(&h->pdev->dev, "unable to get board into"
-					" performant mode\n");
+		dev_err(&h->pdev->dev,
+			"performant mode problem - transport not active\n");
 		return;
 	}
 	/* Change the access methods to the performant access methods */
