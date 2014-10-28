@@ -422,6 +422,16 @@ struct CommandList {
 	struct completion *waiting;
 	struct scsi_cmnd *scsi_cmd;
 	struct work_struct work;
+
+	/* For commands using either of the two "ioaccel" paths to
+	 * bypass the RAID stack and go directly to the physical disk
+	 * phys_disk is a pointer to the hpsa_scsi_dev_t to which the
+	 * i/o is destined.  We need to store that here because the command
+	 * may potentially encounter TASK SET FULL and need to be resubmitted
+	 * For "normal" i/o's not using the "ioaccel" paths, phys_disk is
+	 * not used.
+	 */
+	struct hpsa_scsi_dev_t *phys_disk;
 	atomic_t refcount; /* Must be last to avoid memset in cmd_alloc */
 } __aligned(COMMANDLIST_ALIGNMENT);
 

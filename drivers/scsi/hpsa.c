@@ -246,7 +246,7 @@ static void hpsa_drain_accel_commands(struct ctlr_info *h);
 static void hpsa_flush_cache(struct ctlr_info *h);
 static int hpsa_scsi_ioaccel_queue_command(struct ctlr_info *h,
 	struct CommandList *c, u32 ioaccel_handle, u8 *cdb, int cdb_len,
-	u8 *scsi3addr);
+	u8 *scsi3addr, struct hpsa_scsi_dev_t *phys_disk);
 static void hpsa_command_resubmit_worker(struct work_struct *work);
 static void print_cfg_table(struct device *dev, struct CfgTable *tb);
 
@@ -1501,6 +1501,60 @@ static void hpsa_show_volume_status(struct ctlr_info *h,
 	}
 }
 
+/* Figure the list of physical drive pointers for a logical drive with
+ * raid offload configured.
+ */
+static void hpsa_figure_phys_disk_ptrs(struct ctlr_info *h,
+				struct hpsa_scsi_dev_t *dev[], int ndevices,
+				struct hpsa_scsi_dev_t *logical_drive)
+{
+	struct raid_map_data *map = &logical_drive->raid_map;
+	struct raid_map_disk_data *dd = &map->data[0];
+	int i, j;
+	int nraid_map_entries = logical_drive->raid_map.data_disks_per_row +
+		logical_drive->raid_map.metadata_disks_per_row;
+
+	for (i = 0; i < nraid_map_entries; i++) {
+		logical_drive->phys_disk[i] = NULL;
+		if (!logical_drive->offload_config)
+			continue;
+		for (j = 0; j < ndevices; j++) {
+			if (dev[j]->devtype != TYPE_DISK)
+				continue;
+			if (is_logical_dev_addr_mode(dev[j]->scsi3addr))
+				continue;
+			if (dev[j]->ioaccel_handle == dd[i].ioaccel_handle) {
+				logical_drive->phys_disk[i] = dev[j];
+				break;
+			}
+		}
+
+		/*
+		 * This can happen if a physical drive is removed and
+		 * the logical drive is degraded.  In that case, the RAID
+		 * map data will refer to a physical disk which isn't actually
+		 * present.  And in that case offload_enabled should already
+		 * be 0, but we'll turn it off here just in case
+		 */
+		if (!logical_drive->phys_disk[i])
+			logical_drive->offload_enabled = 0;
+	}
+}
+
+static void hpsa_update_log_drive_phys_drive_ptrs(struct ctlr_info *h,
+				struct hpsa_scsi_dev_t *dev[], int ndevices)
+{
+	int i;
+
+	for (i = 0; i < ndevices; i++) {
+		if (dev[i]->devtype != TYPE_DISK)
+			continue;
+		if (!is_logical_dev_addr_mode(dev[i]->scsi3addr))
+			continue;
+		hpsa_figure_phys_disk_ptrs(h, dev, ndevices, dev[i]);
+	}
+}
+
 static void adjust_hpsa_scsi_table(struct ctlr_info *h, int hostno,
 	struct hpsa_scsi_dev_t *sd[], int nsds)
 {
@@ -1915,7 +1969,7 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 {
 	struct io_accel2_cmd *c2 = &h->ioaccel2_cmd_pool[c->cmdindex];
 
-	atomic_dec(&dev->ioaccel_cmds_out);
+	atomic_dec(&c->phys_disk->ioaccel_cmds_out);
 
 	/* check for good status */
 	if (likely(c2->error_data.serv_response == 0 &&
@@ -2017,7 +2071,7 @@ static void complete_scsi_command(struct CommandList *cp)
 	 */
 	if (cp->cmd_type == CMD_IOACCEL1) {
 		struct io_accel1_cmd *c = &h->ioaccel_cmd_pool[cp->cmdindex];
-		atomic_dec(&dev->ioaccel_cmds_out);
+		atomic_dec(&cp->phys_disk->ioaccel_cmds_out);
 		cp->Header.SGList = cp->Header.SGTotal = scsi_sg_count(cmd);
 		cp->Request.CDBLen = c->io_flags & IOACCEL1_IOFLAGS_CDBLEN_MASK;
 		cp->Header.tag = c->tag;
@@ -3530,6 +3584,7 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 		if (ncurrent >= HPSA_MAX_DEVICES)
 			break;
 	}
+	hpsa_update_log_drive_phys_drive_ptrs(h, currentsd, ncurrent);
 	adjust_hpsa_scsi_table(h, hostno, currentsd, ncurrent);
 out:
 	kfree(tmpdevice);
@@ -3653,7 +3708,7 @@ static int fixup_ioaccel_cdb(u8 *cdb, int *cdb_len)
 
 static int hpsa_scsi_ioaccel1_queue_command(struct ctlr_info *h,
 	struct CommandList *c, u32 ioaccel_handle, u8 *cdb, int cdb_len,
-	u8 *scsi3addr)
+	u8 *scsi3addr, struct hpsa_scsi_dev_t *phys_disk)
 {
 	struct scsi_cmnd *cmd = c->scsi_cmd;
 	struct io_accel1_cmd *cp = &h->ioaccel_cmd_pool[c->cmdindex];
@@ -3666,13 +3721,17 @@ static int hpsa_scsi_ioaccel1_queue_command(struct ctlr_info *h,
 	u32 control = IOACCEL1_CONTROL_SIMPLEQUEUE;
 
 	/* TODO: implement chaining support */
-	if (scsi_sg_count(cmd) > h->ioaccel_maxsg)
+	if (scsi_sg_count(cmd) > h->ioaccel_maxsg) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return IO_ACCEL_INELIGIBLE;
+	}
 
 	BUG_ON(cmd->cmd_len > IOACCEL1_IOFLAGS_CDBLEN_MAX);
 
-	if (fixup_ioaccel_cdb(cdb, &cdb_len))
+	if (fixup_ioaccel_cdb(cdb, &cdb_len)) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return IO_ACCEL_INELIGIBLE;
+	}
 
 	c->cmd_type = CMD_IOACCEL1;
 
@@ -3681,9 +3740,18 @@ static int hpsa_scsi_ioaccel1_queue_command(struct ctlr_info *h,
 				(c->cmdindex * sizeof(*cp));
 	BUG_ON(c->busaddr & 0x0000007F);
 
+	/* Try to honor the device's queue depth */
+	atomic_inc(&phys_disk->ioaccel_cmds_out);
+	if (atomic_read(&phys_disk->ioaccel_cmds_out) > phys_disk->queue_depth) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
+		return IO_ACCEL_INELIGIBLE;
+	}
+
 	use_sg = scsi_dma_map(cmd);
-	if (use_sg < 0)
+	if (use_sg < 0) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return use_sg;
+	}
 
 	if (use_sg) {
 		last_sg = scsi_sg_count(cmd) - 1;
@@ -3744,7 +3812,7 @@ static int hpsa_scsi_ioaccel_direct_map(struct ctlr_info *h,
 	struct hpsa_scsi_dev_t *dev = cmd->device->hostdata;
 
 	return hpsa_scsi_ioaccel_queue_command(h, c, dev->ioaccel_handle,
-		cmd->cmnd, cmd->cmd_len, dev->scsi3addr);
+		cmd->cmnd, cmd->cmd_len, dev->scsi3addr, dev);
 }
 
 /*
@@ -3871,7 +3939,7 @@ static void set_encrypt_ioaccel2(struct ctlr_info *h,
 
 static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 	struct CommandList *c, u32 ioaccel_handle, u8 *cdb, int cdb_len,
-	u8 *scsi3addr)
+	u8 *scsi3addr, struct hpsa_scsi_dev_t *phys_disk)
 {
 	struct scsi_cmnd *cmd = c->scsi_cmd;
 	struct io_accel2_cmd *cp = &h->ioaccel2_cmd_pool[c->cmdindex];
@@ -3882,11 +3950,16 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 	u32 len;
 	u32 total_len = 0;
 
-	if (scsi_sg_count(cmd) > h->ioaccel_maxsg)
+	if (scsi_sg_count(cmd) > h->ioaccel_maxsg) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return IO_ACCEL_INELIGIBLE;
+	}
 
-	if (fixup_ioaccel_cdb(cdb, &cdb_len))
+	if (fixup_ioaccel_cdb(cdb, &cdb_len)) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return IO_ACCEL_INELIGIBLE;
+	}
+
 	c->cmd_type = CMD_IOACCEL2;
 	/* Adjust the DMA address to point to the accelerated command buffer */
 	c->busaddr = (u32) h->ioaccel2_cmd_pool_dhandle +
@@ -3896,9 +3969,18 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 	memset(cp, 0, sizeof(*cp));
 	cp->IU_type = IOACCEL2_IU_TYPE;
 
+	/* Try to honor the device's queue depth */
+	atomic_inc(&phys_disk->ioaccel_cmds_out);
+	if (atomic_read(&phys_disk->ioaccel_cmds_out) > phys_disk->queue_depth) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
+		return IO_ACCEL_INELIGIBLE;
+	}
+
 	use_sg = scsi_dma_map(cmd);
-	if (use_sg < 0)
+	if (use_sg < 0) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
 		return use_sg;
+	}
 
 	if (use_sg) {
 		BUG_ON(use_sg > IOACCEL2_MAXSGENTRIES);
@@ -3964,14 +4046,22 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
  */
 static int hpsa_scsi_ioaccel_queue_command(struct ctlr_info *h,
 	struct CommandList *c, u32 ioaccel_handle, u8 *cdb, int cdb_len,
-	u8 *scsi3addr)
+	u8 *scsi3addr, struct hpsa_scsi_dev_t *phys_disk)
 {
+	/* Try to honor the device's queue depth */
+	if (atomic_inc_return(&phys_disk->ioaccel_cmds_out) >
+					phys_disk->queue_depth) {
+		atomic_dec(&phys_disk->ioaccel_cmds_out);
+		return IO_ACCEL_INELIGIBLE;
+	}
 	if (h->transMethod & CFGTBL_Trans_io_accel1)
 		return hpsa_scsi_ioaccel1_queue_command(h, c, ioaccel_handle,
-						cdb, cdb_len, scsi3addr);
+						cdb, cdb_len, scsi3addr,
+						phys_disk);
 	else
 		return hpsa_scsi_ioaccel2_queue_command(h, c, ioaccel_handle,
-						cdb, cdb_len, scsi3addr);
+						cdb, cdb_len, scsi3addr,
+						phys_disk);
 }
 
 static void raid_map_helper(struct raid_map_data *map,
@@ -4267,6 +4357,8 @@ static int hpsa_scsi_ioaccel_raid_map(struct ctlr_info *h,
 		return IO_ACCEL_INELIGIBLE;
 	}
 
+	c->phys_disk = dev->phys_disk[map_index];
+
 	disk_handle = dd[map_index].ioaccel_handle;
 	disk_block = map->disk_starting_blk + (first_row * map->strip_size) +
 			(first_row_offset - (first_column * map->strip_size));
@@ -4312,7 +4404,8 @@ static int hpsa_scsi_ioaccel_raid_map(struct ctlr_info *h,
 		cdb_len = 10;
 	}
 	return hpsa_scsi_ioaccel_queue_command(h, c, disk_handle, cdb, cdb_len,
-						dev->scsi3addr);
+						dev->scsi3addr,
+						dev->phys_disk[map_index]);
 }
 
 /* Submit commands down the "normal" RAID stack path */
@@ -4429,13 +4522,6 @@ static int hpsa_ioaccel_submit(struct ctlr_info *h,
 
 	cmd->host_scribble = (unsigned char *) c;
 
-	/* Try to honor the device's queue depth */
-	atomic_inc(&dev->ioaccel_cmds_out);
-	if (atomic_read(&dev->ioaccel_cmds_out) > dev->queue_depth) {
-		atomic_dec(&dev->ioaccel_cmds_out);
-		return IO_ACCEL_INELIGIBLE;
-	}
-
 	if (dev->offload_enabled) {
 		hpsa_cmd_init(h, c->cmdindex, c);
 		c->cmd_type = CMD_SCSI;
@@ -4445,7 +4531,6 @@ static int hpsa_ioaccel_submit(struct ctlr_info *h,
 			return 0; /* Sent on ioaccel path */
 		if (rc < 0) {   /* scsi_dma_map failed. */
 			cmd_free(h, c);
-			atomic_dec(&dev->ioaccel_cmds_out);
 			return SCSI_MLQUEUE_HOST_BUSY;
 		}
 	} else if (dev->ioaccel_handle) {
@@ -4457,11 +4542,9 @@ static int hpsa_ioaccel_submit(struct ctlr_info *h,
 			return 0; /* Sent on direct map path */
 		if (rc < 0) {   /* scsi_dma_map failed. */
 			cmd_free(h, c);
-			atomic_dec(&dev->ioaccel_cmds_out);
 			return SCSI_MLQUEUE_HOST_BUSY;
 		}
 	}
-	atomic_dec(&dev->ioaccel_cmds_out);
 	return rc;
 }
 
