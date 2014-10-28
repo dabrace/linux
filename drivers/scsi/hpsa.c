@@ -228,9 +228,8 @@ static void check_ioctl_unit_attention(struct ctlr_info *h,
 /* performant mode helper functions */
 static void calc_bucket_map(int *bucket, int num_buckets,
 	int nsgs, int min_blocks, int *bucket_map);
+static void hpsa_free_performant_mode(struct ctlr_info *h);
 static int hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h);
-static void hpsa_free_ioaccel1_cmd_and_bft(struct ctlr_info *h);
-static void hpsa_free_ioaccel2_cmd_and_bft(struct ctlr_info *h);
 static inline u32 next_command(struct ctlr_info *h, u8 q);
 static int hpsa_find_cfg_addrs(struct pci_dev *pdev, void __iomem *vaddr,
 			       u32 *cfg_base_addr, u64 *cfg_base_addr_index,
@@ -7294,20 +7293,17 @@ static void hpsa_free_reply_queues(struct ctlr_info *h)
 
 static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 {
-	hpsa_free_irqs(h);
-	hpsa_free_sg_chain_blocks(h);		/* init_one 6 */
+	hpsa_free_performant_mode(h);		/* init_one 7 */
 	hpsa_free_ioaccel2_sg_chain_blocks(h);
-	hpsa_free_cmd_pool(h);
-	kfree(h->blockFetchTable);		/* perf 2 */
-	hpsa_free_reply_queues(h);		/* perf 1 */
-	hpsa_free_ioaccel1_cmd_and_bft(h);	/* perf 1 */
-	hpsa_free_ioaccel2_cmd_and_bft(h);	/* perf 1 */
+	hpsa_free_sg_chain_blocks(h);		/* init_one 6 */
+	hpsa_free_cmd_pool(h);			/* init_one 5 */
+	hpsa_free_irqs(h);			/* init_one 4 */
 	hpsa_free_cfgtables(h);			/* pci_init 4 */
 	iounmap(h->vaddr);			/* pci_init 3 */
 	hpsa_disable_interrupt_mode(h);		/* pci_init 2 */
 	pci_disable_device(h->pdev);
 	pci_release_regions(h->pdev);		/* pci_init 2 */
-	kfree(h);
+	kfree(h);				/* init_one 1 */
 }
 
 /* Called when controller lockup detected. */
@@ -7782,8 +7778,9 @@ reinit_after_soft_reset:
 	h->access.set_intr_mask(h, HPSA_INTR_ON);
 
 	hpsa_hba_inquiry(h);
-	if (hpsa_register_scsi(h)) /* hook ourselves into SCSI subsystem */
-		goto clean4;
+	rc = hpsa_register_scsi(h);	/* hook ourselves into SCSI subsystem */
+	if (rc)
+		goto clean7;
 
 	/* Monitor the controller for firmware lockups */
 	h->heartbeat_sample_interval = HEARTBEAT_SAMPLE_INTERVAL;
@@ -7795,6 +7792,8 @@ reinit_after_soft_reset:
 				h->heartbeat_sample_interval);
 	return 0;
 
+clean7: /* perf, sg, cmd, irq, pci, lockup, wq/aer/h */
+	hpsa_free_performant_mode(h);
 clean6: /* sg, cmd, irq, pci, lockup, wq/aer/h */	hpsa_free_sg_chain_blocks(h);
 clean5: /* cmd, irq, pci, lockup, wq/aer/h */
 	hpsa_free_cmd_pool(h);
@@ -7808,7 +7807,7 @@ clean2: /* lockup, wq/aer/h */
 clean1:	/* wq/aer/h */
 	if (h->resubmit_wq)
 		destroy_workqueue(h->resubmit_wq);
-	/* pci_disable_pcie_error_reporting(pdev); */
+	/* (void) pci_disable_pcie_error_reporting(pdev); */
 	kfree(h);
 	return rc;
 }
@@ -7855,7 +7854,7 @@ static void hpsa_shutdown(struct pci_dev *pdev)
 	 */
 	hpsa_flush_cache(h);
 	h->access.set_intr_mask(h, HPSA_INTR_OFF);
-	hpsa_free_irqs(h);
+	hpsa_free_irqs(h);			/* init_one 4 */
 	hpsa_disable_interrupt_mode(h);		/* pci_init 2 */
 }
 
@@ -7884,28 +7883,30 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	cancel_delayed_work_sync(&h->monitor_ctlr_work);
 	cancel_delayed_work_sync(&h->rescan_ctlr_work);
 	spin_unlock_irqrestore(&h->lock, flags);
-	hpsa_unregister_scsi(h);	/* unhook from SCSI subsystem */
 
-	/* includes hpsa_free_irqs */
+	/* includes hpsa_free_irqs - init_one 4 */
 	/* includes hpsa_disable_interrupt_mode - pci_init 2 */
 	hpsa_shutdown(pdev);
 
-	destroy_workqueue(h->resubmit_wq);
-	hpsa_free_device_info(h);
-	hpsa_free_sg_chain_blocks(h);		/* init_one 6 */
+	hpsa_free_device_info(h);		/* scan */
+
+	hpsa_unregister_scsi(h);			/* init_one "8" */
 	hpsa_free_ioaccel2_sg_chain_blocks(h);
-	kfree(h->blockFetchTable);		/* perf 2 */
-	hpsa_free_reply_queues(h);		/* perf 1 */
-	hpsa_free_ioaccel1_cmd_and_bft(h);	/* perf 1 */
-	hpsa_free_ioaccel2_cmd_and_bft(h);	/* perf 1 */
-	hpsa_free_cmd_pool(h);			/* init_one 5 */
-	kfree(h->hba_inquiry_data);
+	kfree(h->hba_inquiry_data);			/* init_one "8" */
+	hpsa_free_performant_mode(h);			/* init_one 7 */
+	hpsa_free_sg_chain_blocks(h);			/* init_one 6 */
+	hpsa_free_cmd_pool(h);				/* init_one 5 */
+
+	/* hpsa_free_irqs already called via hpsa_shutdown init_one 4 */
 
 	/* includes hpsa_disable_interrupt_mode - pci_init 2 */
-	hpsa_free_pci_init(h);
+	hpsa_free_pci_init(h);				/* init_one 3 */
 
-	free_percpu(h->lockup_detected);
-	kfree(h);
+	free_percpu(h->lockup_detected);		/* init_one 2 */
+	if (h->resubmit_wq)
+		destroy_workqueue(h->resubmit_wq);	/* init_one 1 */
+	/* (void) pci_disable_pcie_error_reporting(pdev); */	/* init_one 1 */
+	kfree(h);					/* init_one 1 */
 }
 
 static int hpsa_suspend(__attribute__((unused)) struct pci_dev *pdev,
@@ -8236,6 +8237,15 @@ static int hpsa_alloc_ioaccel2_cmd_and_bft(struct ctlr_info *h)
 clean_up:
 	hpsa_free_ioaccel2_cmd_and_bft(h);
 	return -ENOMEM;
+}
+
+/* Free items allocated by hpsa_put_ctlr_into_performant_mode */
+static void hpsa_free_performant_mode(struct ctlr_info *h)
+{
+	kfree(h->blockFetchTable);
+	hpsa_free_reply_queues(h);
+	hpsa_free_ioaccel1_cmd_and_bft(h);
+	hpsa_free_ioaccel2_cmd_and_bft(h);
 }
 
 /* return -ENODEV on error, 0 on success (or no action)
