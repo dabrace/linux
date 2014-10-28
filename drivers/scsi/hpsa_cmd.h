@@ -416,7 +416,7 @@ struct CommandList {
 	int			   cmd_type;
 	long			   cmdindex;
 	struct completion *waiting;
-	void   *scsi_cmd;
+	struct scsi_cmnd *scsi_cmd;
 	struct work_struct work;
 	atomic_t refcount; /* Must be last to avoid memset in cmd_alloc */
 } __aligned(COMMANDLIST_ALIGNMENT);
