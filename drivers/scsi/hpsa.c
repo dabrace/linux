@@ -5399,11 +5399,6 @@ static inline void finish_cmd(struct CommandList *c)
 		complete(c->waiting);
 }
 
-static inline u32 hpsa_tag_contains_index(u32 tag)
-{
-	return tag & DIRECT_LOOKUP_BIT;
-}
-
 static inline u32 hpsa_tag_to_index(u32 tag)
 {
 	return tag >> DIRECT_LOOKUP_SHIFT;
@@ -5431,32 +5426,6 @@ static inline void process_indexed_cmd(struct ctlr_info *h,
 		c = h->cmd_pool + tag_index;
 		finish_cmd(c);
 	}
-}
-
-/* process completion of a non-indexed command */
-static inline void process_nonindexed_cmd(struct ctlr_info *h,
-	u32 raw_tag)
-{
-	u32 tag;
-	struct CommandList *c = NULL;
-	unsigned long flags;
-
-	/* FIXME finish removing process nonindexed command */
-	dev_warn(&h->pdev->dev, "unexpectedly got non-indexed command\n");
-	return;
-#if 0
-	tag = hpsa_tag_discard_error_bits(h, raw_tag);
-	spin_lock_irqsave(&h->lock, flags);
-	list_for_each_entry(c, &h->cmpQ, list) {
-		if ((c->busaddr & 0xFFFFFFE0) == (tag & 0xFFFFFFE0)) {
-			spin_unlock_irqrestore(&h->lock, flags);
-			finish_cmd(c);
-			return;
-		}
-	}
-	spin_unlock_irqrestore(&h->lock, flags);
-	bad_tag(h, h->nr_cmds + 1, raw_tag);
-#endif
 }
 
 /* Some controllers, like p400, will give us one interrupt
@@ -5536,10 +5505,7 @@ static irqreturn_t do_hpsa_intr_intx(int irq, void *queue)
 	while (interrupt_pending(h)) {
 		raw_tag = get_next_completion(h, q);
 		while (raw_tag != FIFO_EMPTY) {
-			if (likely(hpsa_tag_contains_index(raw_tag)))
-				process_indexed_cmd(h, raw_tag);
-			else
-				process_nonindexed_cmd(h, raw_tag);
+			process_indexed_cmd(h, raw_tag);
 			raw_tag = next_command(h, q);
 		}
 	}
@@ -5555,10 +5521,7 @@ static irqreturn_t do_hpsa_intr_msi(int irq, void *queue)
 	h->last_intr_timestamp = get_jiffies_64();
 	raw_tag = get_next_completion(h, q);
 	while (raw_tag != FIFO_EMPTY) {
-		if (likely(hpsa_tag_contains_index(raw_tag)))
-			process_indexed_cmd(h, raw_tag);
-		else
-			process_nonindexed_cmd(h, raw_tag);
+		process_indexed_cmd(h, raw_tag);
 		raw_tag = next_command(h, q);
 	}
 	return IRQ_HANDLED;
