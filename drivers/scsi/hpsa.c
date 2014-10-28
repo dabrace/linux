@@ -190,7 +190,6 @@ static struct board_type products[] = {
 };
 
 static int number_of_controllers;
-static struct workqueue_struct *hpsa_wq;
 
 static irqreturn_t do_hpsa_intr_intx(int irq, void *dev_id);
 static irqreturn_t do_hpsa_intr_msi(int irq, void *dev_id);
@@ -1811,7 +1810,7 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 
 retry_cmd:
 	INIT_WORK(&c->work, hpsa_command_resubmit_worker);
-	queue_work_on(raw_smp_processor_id(), hpsa_wq, &c->work);
+	queue_work_on(raw_smp_processor_id(), h->resubmit_wq, &c->work);
 }
 
 static void complete_scsi_command(struct CommandList *cp)
@@ -1881,7 +1880,7 @@ static void complete_scsi_command(struct CommandList *cp)
 				dev->offload_enabled = 0;
 			INIT_WORK(&cp->work, hpsa_command_resubmit_worker);
 			queue_work_on(raw_smp_processor_id(),
-					hpsa_wq, &cp->work);
+					h->resubmit_wq, &cp->work);
 			return;
 		}
 	}
@@ -6869,7 +6868,7 @@ static void fail_all_outstanding_cmds(struct ctlr_info *h)
 	int i, refcount;
 	struct CommandList *c;
 
-	flush_workqueue(hpsa_wq); /* ensure all cmds are fully built */
+	flush_workqueue(h->resubmit_wq); /* ensure all cmds are fully built */
 	for (i = 0; i < h->nr_cmds; i++) {
 		c = h->cmd_pool + i;
 		refcount = atomic_inc_return(&c->refcount);
@@ -7186,6 +7185,12 @@ reinit_after_soft_reset:
 	spin_lock_init(&h->scan_lock);
 	atomic_set(&h->passthru_cmds_avail, HPSA_MAX_CONCURRENT_PASSTHRUS);
 
+	h->resubmit_wq = alloc_workqueue("hpsa", WQ_MEM_RECLAIM, 0);
+	if (!h->resubmit_wq) {
+		dev_warn(&h->pdev->dev, "Failed to allocate work queue\n");
+		rc = -ENOMEM;
+		goto clean1;
+	}
 	/* Allocate and clear per-cpu variable lockup_detected */
 	h->lockup_detected = alloc_percpu(u32);
 	if (!h->lockup_detected) {
@@ -7318,6 +7323,8 @@ clean4:
 	free_irqs(h);
 clean2:
 clean1:
+	if (h->resubmit_wq)
+		destroy_workqueue(h->resubmit_wq);
 	if (h->lockup_detected)
 		free_percpu(h->lockup_detected);
 	kfree(h);
@@ -7397,9 +7404,9 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	h->remove_in_progress = 1;
 	cancel_delayed_work(&h->monitor_ctlr_work);
 	spin_unlock_irqrestore(&h->lock, flags);
-
 	hpsa_unregister_scsi(h);	/* unhook from SCSI subsystem */
 	hpsa_shutdown(pdev);
+	destroy_workqueue(h->resubmit_wq);
 	iounmap(h->vaddr);
 	iounmap(h->transtable);
 	iounmap(h->cfgtable);
@@ -7817,19 +7824,12 @@ static void hpsa_drain_accel_commands(struct ctlr_info *h)
  */
 static int __init hpsa_init(void)
 {
-	hpsa_wq = alloc_workqueue("hpsa", WQ_MEM_RECLAIM, 0);
-	if (!hpsa_wq) {
-		pr_warn(HPSA "Failed to allocate work queue\n");
-		return -ENOMEM;
-	}
 	return pci_register_driver(&hpsa_pci_driver);
 }
 
 static void __exit hpsa_cleanup(void)
 {
 	pci_unregister_driver(&hpsa_pci_driver);
-	if (hpsa_wq)
-		destroy_workqueue(hpsa_wq);
 }
 
 static void __attribute__((unused)) verify_offsets(void)
