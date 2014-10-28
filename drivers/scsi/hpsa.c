@@ -4130,7 +4130,86 @@ static int hpsa_scsi_queue_command_lck(struct scsi_cmnd *cmd,
 	return 0;
 }
 
-static DEF_SCSI_QCMD(hpsa_scsi_queue_command)
+static void hpsa_command_resubmit_worker(struct work_struct *work)
+{
+	struct scsi_cmnd *cmd;
+	struct hpsa_scsi_dev_t *dev;
+	struct CommandList *c =
+			container_of(work, struct CommandList, work);
+
+	cmd = c->scsi_cmd;
+	dev = cmd->device->hostdata;
+	if (!dev) {
+		cmd->result = DID_NO_CONNECT << 16;
+		cmd->scsi_done(cmd);
+		return;
+	}
+	if (hpsa_ciss_submit(c->h, c, cmd, dev->scsi3addr)) {
+		/*
+		 * If we get here, it means dma mapping failed. Try
+		 * again via scsi mid layer, which will then get
+		 * SCSI_MLQUEUE_HOST_BUSY.
+		 */
+		cmd->result = DID_IMM_RETRY << 16;
+		cmd->scsi_done(cmd);
+	}
+}
+
+/* Running in struct Scsi_Host->host_lock less mode */
+static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
+{
+	struct ctlr_info *h;
+	struct hpsa_scsi_dev_t *dev;
+	unsigned char scsi3addr[8];
+	struct CommandList *c;
+	int rc = 0;
+
+	/* Get the ptr to our adapter structure out of cmd->host. */
+	h = sdev_to_hba(cmd->device);
+	dev = cmd->device->hostdata;
+	if (!dev) {
+		cmd->result = DID_NO_CONNECT << 16;
+		cmd->scsi_done(cmd);
+		return 0;
+	}
+	memcpy(scsi3addr, dev->scsi3addr, sizeof(scsi3addr));
+
+	if (unlikely(lockup_detected(h))) {
+		cmd->result = DID_ERROR << 16;
+		cmd->scsi_done(cmd);
+		return 0;
+	}
+	c = cmd_alloc(h);
+	if (c == NULL) {			/* trouble... */
+		dev_err(&h->pdev->dev, "cmd_alloc returned NULL!\n");
+		return SCSI_MLQUEUE_HOST_BUSY;
+	}
+	if (unlikely(lockup_detected(h))) {
+		cmd->result = DID_ERROR << 16;
+		cmd_free(h, c);
+		cmd->scsi_done(cmd);
+		return 0;
+	}
+>>>>>>> patched
+
+		break;
+
+	default:
+		dev_err(&h->pdev->dev, "unknown data direction: %d\n",
+			cmd->sc_data_direction);
+		BUG();
+		break;
+	}
+
+	if (hpsa_scatter_gather(h, c, cmd) < 0) { /* Fill SG list */
+		cmd_free(h, c);
+		return SCSI_MLQUEUE_HOST_BUSY;
+	}
+	enqueue_cmd_and_start_io(h, c);
+	/* the cmd'll come back via intr handler in complete_scsi_command()  */
+	return 0;
+}
+>>>>>>> patched
 
 static int do_not_scan_if_controller_locked_up(struct ctlr_info *h)
 {
