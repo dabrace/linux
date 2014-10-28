@@ -7158,6 +7158,27 @@ static int hpsa_offline_devices_ready(struct ctlr_info *h)
 	return 0;
 }
 
+static void hpsa_rescan_ctlr_worker(struct work_struct *work)
+{
+	unsigned long flags;
+	struct ctlr_info *h = container_of(to_delayed_work(work),
+					struct ctlr_info, rescan_ctlr_work);
+
+	if (hpsa_ctlr_needs_rescan(h) || hpsa_offline_devices_ready(h)) {
+		scsi_host_get(h->scsi_host);
+		hpsa_ack_ctlr_events(h);
+		hpsa_scan_start(h->scsi_host);
+		scsi_host_put(h->scsi_host);
+	}
+	spin_lock_irqsave(&h->lock, flags);
+	if (h->remove_in_progress) {
+		spin_unlock_irqrestore(&h->lock, flags);
+		return;
+	}
+	schedule_delayed_work(&h->rescan_ctlr_work,
+				h->heartbeat_sample_interval);
+	spin_unlock_irqrestore(&h->lock, flags);
+}
 
 static void hpsa_monitor_ctlr_worker(struct work_struct *work)
 {
@@ -7168,19 +7189,11 @@ static void hpsa_monitor_ctlr_worker(struct work_struct *work)
 	if (lockup_detected(h))
 		return;
 
-	if (hpsa_ctlr_needs_rescan(h) || hpsa_offline_devices_ready(h)) {
-		scsi_host_get(h->scsi_host);
-		hpsa_ack_ctlr_events(h);
-		hpsa_scan_start(h->scsi_host);
-		scsi_host_put(h->scsi_host);
-	}
-
 	spin_lock_irqsave(&h->lock, flags);
-	if (h->remove_in_progress) {
+	if (h->remove_in_progress)
 		spin_unlock_irqrestore(&h->lock, flags);
-		return;
-	}
-	schedule_delayed_work(&h->monitor_ctlr_work,
+	else
+		schedule_delayed_work(&h->monitor_ctlr_work,
 				h->heartbeat_sample_interval);
 	spin_unlock_irqrestore(&h->lock, flags);
 }
@@ -7437,6 +7450,9 @@ reinit_after_soft_reset:
 	INIT_DELAYED_WORK(&h->monitor_ctlr_work, hpsa_monitor_ctlr_worker);
 	schedule_delayed_work(&h->monitor_ctlr_work,
 				h->heartbeat_sample_interval);
+	INIT_DELAYED_WORK(&h->rescan_ctlr_work, hpsa_rescan_ctlr_worker);
+	schedule_delayed_work(&h->rescan_ctlr_work,
+				h->heartbeat_sample_interval);
 	return 0;
 
 clean4:
@@ -7525,6 +7541,7 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	spin_lock_irqsave(&h->lock, flags);
 	h->remove_in_progress = 1;
 	cancel_delayed_work(&h->monitor_ctlr_work);
+	cancel_delayed_work(&h->rescan_ctlr_work);
 	spin_unlock_irqrestore(&h->lock, flags);
 	hpsa_unregister_scsi(h);	/* unhook from SCSI subsystem */
 	hpsa_shutdown(pdev);
