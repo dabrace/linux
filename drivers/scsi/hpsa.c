@@ -4943,6 +4943,8 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 		return SCSI_MLQUEUE_HOST_BUSY;
 	}
 
+=======
+>>>>>>> patched
 	/* Call alternate submit routine for I/O accelerated commands.
 	 * Retries always go down the normal I/O path.
 	 */
