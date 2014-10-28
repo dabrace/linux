@@ -228,7 +228,7 @@ static void check_ioctl_unit_attention(struct ctlr_info *h,
 /* performant mode helper functions */
 static void calc_bucket_map(int *bucket, int num_buckets,
 	int nsgs, int min_blocks, int *bucket_map);
-static void hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h);
+static int hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h);
 static void hpsa_free_ioaccel1_cmd_and_bft(struct ctlr_info *h);
 static void hpsa_free_ioaccel2_cmd_and_bft(struct ctlr_info *h);
 static inline u32 next_command(struct ctlr_info *h, u8 q);
@@ -8226,33 +8226,36 @@ clean_up:
 	return -ENOMEM;
 }
 
-static void hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h)
+/* return -ENODEV on error, 0 on success (or no action)
+ * allocates numerous items that must be freed later
+ */
+static int hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h)
 {
 	u32 trans_support;
 	unsigned long transMethod = CFGTBL_Trans_Performant |
 					CFGTBL_Trans_use_short_tags;
-	int i;
+	int i, rc;
 
 	if (hpsa_simple_mode)
-		return;
+		return 0;
 
 	trans_support = readl(&(h->cfgtable->TransportSupport));
 	if (!(trans_support & PERFORMANT_MODE))
-		return;
+		return 0;
 
 	/* Check for I/O accelerator mode support */
 	if (trans_support & CFGTBL_Trans_io_accel1) {
 		transMethod |= CFGTBL_Trans_io_accel1 |
 				CFGTBL_Trans_enable_directed_msix;
-		if (hpsa_alloc_ioaccel1_cmd_and_bft(h))
-			goto clean_up;
-	} else {
-		if (trans_support & CFGTBL_Trans_io_accel2) {
-				transMethod |= CFGTBL_Trans_io_accel2 |
+		rc = hpsa_alloc_ioaccel1_cmd_and_bft(h);
+		if (rc)
+			return rc;
+	} else if (trans_support & CFGTBL_Trans_io_accel2) {
+		transMethod |= CFGTBL_Trans_io_accel2 |
 				CFGTBL_Trans_enable_directed_msix;
-		if (hpsa_alloc_ioaccel2_cmd_and_bft(h))
-			goto clean_up;
-		}
+		rc = hpsa_alloc_ioaccel2_cmd_and_bft(h);
+		if (rc)
+			return rc;
 	}
 
 	h->nreply_queues = h->msix_vector > 0 ? h->msix_vector : 1;
@@ -8264,8 +8267,10 @@ static void hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h)
 		h->reply_queue[i].head = pci_alloc_consistent(h->pdev,
 						h->reply_queue_size,
 						&(h->reply_queue[i].busaddr));
-		if (!h->reply_queue[i].head)
-			goto clean_up;
+		if (!h->reply_queue[i].head) {
+			rc = -ENOMEM;
+			goto clean1;	/* rq, ioaccel */
+		}
 		h->reply_queue[i].size = h->max_commands;
 		h->reply_queue[i].wraparound = 1;  /* spec: init to 1 */
 		h->reply_queue[i].current_entry = 0;
@@ -8274,15 +8279,23 @@ static void hpsa_put_ctlr_into_performant_mode(struct ctlr_info *h)
 	/* Need a block fetch table for performant mode */
 	h->blockFetchTable = kmalloc(((SG_ENTRIES_IN_CMD + 1) *
 				sizeof(u32)), GFP_KERNEL);
-	if (!h->blockFetchTable)
-		goto clean_up;
+	if (!h->blockFetchTable) {
+		rc = -ENOMEM;
+		goto clean1;	/* rq, ioaccel */
+	}
 
-	hpsa_enter_performant_mode(h, trans_support);
-	return;
+	rc = hpsa_enter_performant_mode(h, trans_support);
+	if (rc)
+		goto clean2;	/* bft, rq, ioaccel */
+	return 0;
 
-clean_up:
-	hpsa_free_reply_queues(h);
+clean2:	/* bft, rq, ioaccel */
 	kfree(h->blockFetchTable);
+clean1:	/* rq, ioaccel */
+	hpsa_free_reply_queues(h);
+	hpsa_free_ioaccel1_cmd_and_bft(h);
+	hpsa_free_ioaccel2_cmd_and_bft(h);
+	return rc;
 }
 
 static int is_accelerated_cmd(struct CommandList *c)
