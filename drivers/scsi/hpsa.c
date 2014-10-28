@@ -8183,24 +8183,18 @@ reinit_after_soft_reset:
 	atomic_set(&h->abort_cmds_available, HPSA_CMDS_RESERVED_FOR_ABORTS);
 	atomic_set(&h->cmds_sent, 0);
 
-	h->resubmit_wq = alloc_workqueue("hpsa", WQ_MEM_RECLAIM, 0);
-	if (!h->resubmit_wq) {
-		dev_err(&h->pdev->dev, "Failed to allocate work queue\n");
-		rc = -ENOMEM;
-		goto clean1;	/* aer/h */
-	}
 	/* Allocate and clear per-cpu variable lockup_detected */
 	h->lockup_detected = alloc_percpu(u32);
 	if (!h->lockup_detected) {
 		dev_err(&h->pdev->dev, "Failed to allocate lockup detector\n");
 		rc = -ENOMEM;
-		goto clean1;	/* wq/aer/h */
+		goto clean1;	/* aer/h */
 	}
 	set_lockup_detected_for_all_cpus(h, 0);
 
 	rc = hpsa_pci_init(h);
 	if (rc)
-		goto clean2;	/* lockup, wq/aer/h */
+		goto clean2;	/* lockup, aer/h */
 
 	sprintf(h->devname, HPSA "%d", number_of_controllers);
 	h->ctlr = number_of_controllers;
@@ -8216,7 +8210,7 @@ reinit_after_soft_reset:
 			dac = 0;
 		} else {
 			dev_err(&pdev->dev, "no suitable DMA available\n");
-			goto clean3;	/* pci, lockup, wq/aer/h */
+			goto clean3;	/* pci, lockup, aer/h */
 		}
 	}
 
@@ -8225,16 +8219,16 @@ reinit_after_soft_reset:
 
 	rc = hpsa_request_irqs(h, do_hpsa_intr_msi, do_hpsa_intr_intx);
 	if (rc)
-		goto clean3;	/* pci, lockup, wq/aer/h */
+		goto clean3;	/* pci, lockup, aer/h */
 	dev_info(&pdev->dev, "%s: <0x%x> at IRQ %d%s using DAC\n",
 	       h->devname, pdev->device,
 	       h->intr[h->intr_mode], dac ? "" : " not");
 	rc = hpsa_alloc_cmd_pool(h);
 	if (rc)
-		goto clean4;	/* irq, pci, lockup, wq/aer/h */
+		goto clean4;	/* irq, pci, lockup, aer/h */
 	rc = hpsa_alloc_sg_chain_blocks(h);
 	if (rc)
-		goto clean5;	/* cmd, irq, pci, lockup, wq/aer/h */
+		goto clean5;	/* cmd, irq, pci, lockup, aer/h */
 	init_waitqueue_head(&h->scan_wait_queue);
 	init_waitqueue_head(&h->abort_cmd_wait_queue);
 	init_waitqueue_head(&h->abort_sync_wait_queue);
@@ -8247,7 +8241,15 @@ reinit_after_soft_reset:
 	spin_lock_init(&h->devlock);
 	rc = hpsa_put_ctlr_into_performant_mode(h);
 	if (rc)
-		goto clean6;	/* sg, cmd, irq, pci, lockup, wq/aer/h */
+		goto clean6;	/* sg, cmd, irq, pci, lockup, aer/h */
+
+	/* create the resubmit workqueue */
+	h->resubmit_wq = alloc_workqueue("hpsa", WQ_MEM_RECLAIM, 0);
+	if (!h->resubmit_wq) {
+		dev_err(&h->pdev->dev, "Failed to allocate work queue\n");
+		rc = -ENOMEM;
+		goto clean7;	/* perf, sg, cmd, irq, pci, lockup, aer/h */
+	}
 
 	/* At this point, the controller is ready to take commands.
 	 * Now, if reset_devices and the hard reset didn't work, try
@@ -8271,8 +8273,10 @@ reinit_after_soft_reset:
 		if (rc) {
 			dev_warn(&h->pdev->dev,
 				"Failed to request_irq after soft reset.\n");
-			/* cannot goto clean7 or free_irqs will be called
+			/* cannot goto clean8 or free_irqs will be called
 			 * again. Instead, do its work */
+			if (h->resubmit_wq)
+				destroy_workqueue(h->resubmit_wq); /* clean8 */
 			hpsa_free_performant_mode(h);	/* clean7 */
 			hpsa_free_sg_chain_blocks(h);	/* clean6 */
 			hpsa_free_cmd_pool(h);		/* clean5 */
@@ -8284,7 +8288,7 @@ reinit_after_soft_reset:
 		rc = hpsa_kdump_soft_reset(h);
 		if (rc)
 			/* Neither hard nor soft reset worked, we're hosed. */
-			goto clean7;
+			goto clean8;
 
 		dev_info(&h->pdev->dev, "Board READY.\n");
 		dev_info(&h->pdev->dev,
@@ -8322,7 +8326,7 @@ reinit_after_soft_reset:
 	hpsa_hba_inquiry(h);
 	rc = hpsa_register_scsi(h);	/* hook ourselves into SCSI subsystem */
 	if (rc)
-		goto clean7;
+		goto clean8; /* wq, perf, sg, cmd, irq, pci, lockup, aer/h */
 
 	/* Monitor the controller for firmware lockups */
 	h->heartbeat_sample_interval = HEARTBEAT_SAMPLE_INTERVAL;
@@ -8334,23 +8338,24 @@ reinit_after_soft_reset:
 				h->heartbeat_sample_interval);
 	return 0;
 
-clean7: /* perf, sg, cmd, irq, pci, lockup, wq/aer/h */
+clean8: /* wq, perf, sg, cmd, irq, pci, lockup, aer/h */
+	if (h->resubmit_wq)
+		destroy_workqueue(h->resubmit_wq);
+clean7: /* perf, sg, cmd, irq, pci, lockup, aer/h */
 	hpsa_free_performant_mode(h);
-clean6: /* sg, cmd, irq, pci, lockup, wq/aer/h */	hpsa_free_sg_chain_blocks(h);
-clean5: /* cmd, irq, pci, lockup, wq/aer/h */
+clean6: /* sg, cmd, irq, pci, lockup, aer/h */	hpsa_free_sg_chain_blocks(h);
+clean5: /* cmd, irq, pci, lockup, aer/h */
 	hpsa_free_cmd_pool(h);
-clean4: /* irq, pci, lockup, wq/aer/h */
+clean4: /* irq, pci, lockup, aer/h */
 	hpsa_free_irqs(h);
-clean3: /* pci, lockup, wq/aer/h */
+clean3: /* pci, lockup, aer/h */
 	hpsa_free_pci_init(h);
-clean2: /* lockup, wq/aer/h */
+clean2: /* lockup, aer/h */
 	if (h->lockup_detected) {
 		free_percpu(h->lockup_detected);
 		h->lockup_detected = NULL;
 	}
-clean1:	/* wq/aer/h */
-	if (h->resubmit_wq)
-		destroy_workqueue(h->resubmit_wq);
+clean1:	/* aer/h */
 	/* (void) pci_disable_pcie_error_reporting(pdev); */
 	kfree(h);
 	return rc;
@@ -8437,9 +8442,11 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 
 	hpsa_free_device_info(h);		/* scan */
 
-	hpsa_unregister_scsi(h);			/* init_one "8" */
-	kfree(h->hba_inquiry_data);			/* init_one "8" */
-	h->hba_inquiry_data = NULL;			/* init_one "8" */
+	hpsa_unregister_scsi(h);			/* init_one 9 */
+	kfree(h->hba_inquiry_data);			/* init_one 9 */
+	h->hba_inquiry_data = NULL;			/* init_one 9 */
+	if (h->resubmit_wq)
+		destroy_workqueue(h->resubmit_wq);	/* init_one 8 */
 	hpsa_free_performant_mode(h);			/* init_one 7 */
 	hpsa_free_sg_chain_blocks(h);			/* init_one 6 */
 	hpsa_free_cmd_pool(h);				/* init_one 5 */
@@ -8451,8 +8458,6 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 
 	free_percpu(h->lockup_detected);		/* init_one 2 */
 	h->lockup_detected = NULL;			/* init_one 2 */
-	if (h->resubmit_wq)
-		destroy_workqueue(h->resubmit_wq);	/* init_one 1 */
 	/* (void) pci_disable_pcie_error_reporting(pdev); */	/* init_one 1 */
 	kfree(h);					/* init_one 1 */
 }
