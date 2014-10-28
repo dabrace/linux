@@ -5325,7 +5325,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	/* if controller locked up, we can guarantee command won't complete */
 	if (lockup_detected(h)) {
 		dev_warn(&h->pdev->dev,
-			"scsi %d:%d:%d:%d scmd %p ABORT FAILED, lockup detected\n",
+			"scsi %d:%d:%d:%llu scmd %p ABORT FAILED, lockup detected\n",
 			h->scsi_host->host_no, sc->device->channel,
 			sc->device->id, sc->device->lun, sc);
 		return FAILED;
@@ -5339,7 +5339,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		/* check again in case one just occurred */
 		if (lockup_detected(h)) {
 			dev_warn(&h->pdev->dev,
-				"scsi %d:%d:%d:%d scmd %p ABORT FAILED, lockup detected\n",
+				"scsi %d:%d:%d:%llu scmd %p ABORT FAILED, lockup detected\n",
 				h->scsi_host->host_no, sc->device->channel,
 				sc->device->id, sc->device->lun, sc);
 			return FAILED;
