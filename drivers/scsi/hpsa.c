@@ -262,13 +262,53 @@ static inline struct ctlr_info *shost_to_hba(struct Scsi_Host *sh)
 	return (struct ctlr_info *) *priv;
 }
 
+/* extract sense key, asc, and ascq from sense data.  -1 means invalid. */
+static void decode_sense_data(const u8 *sense_data, int sense_data_len,
+			int *sense_key, int *asc, int *ascq)
+{
+	if (sense_data_len < 1) {
+		*sense_key = -1;
+		*ascq = -1;
+		*asc = -1;
+		return;
+	}
+
+	switch (sense_data[0]) {
+	case 0x70: /* old format sense data */
+		*sense_key = (sense_data_len > 2) ? sense_data[2] & 0x0f : -1;
+		*ascq = (sense_data_len > 13) ?  sense_data[13] : -1;
+		*asc = (sense_data_len > 12) ?  sense_data[12] : -1;
+		break;
+	case 0x72: /* descriptor format sense data */
+		*sense_key = (sense_data_len > 1) ? sense_data[1] & 0x0f : -1;
+		*ascq = (sense_data_len > 2) ?  sense_data[2] : -1;
+		*asc = (sense_data_len > 3) ?  sense_data[3] : -1;
+		break;
+	default:
+		*sense_key = -1;
+		*ascq = -1;
+		*asc = -1;
+		break;
+	}
+}
+
 static int check_for_unit_attention(struct ctlr_info *h,
 	struct CommandList *c)
 {
-	if (c->err_info->SenseInfo[2] != UNIT_ATTENTION)
+	int sense_key, asc, ascq;
+	int sense_len;
+
+	if (c->err_info->SenseLen > sizeof(c->err_info->SenseInfo))
+		sense_len = sizeof(c->err_info->SenseInfo);
+	else
+		sense_len = c->err_info->SenseLen;
+
+	decode_sense_data(c->err_info->SenseInfo, sense_len,
+				&sense_key, &asc, &ascq);
+	if (sense_key != UNIT_ATTENTION || asc == -1)
 		return 0;
 
-	switch (c->err_info->SenseInfo[12]) {
+	switch (asc) {
 	case STATE_CHANGED:
 		dev_warn(&h->pdev->dev, HPSA "%d: a state change "
 			"detected, command retried\n", h->ctlr);
@@ -1846,9 +1886,9 @@ static void complete_scsi_command(struct CommandList *cp)
 	struct ErrorInfo *ei;
 	struct hpsa_scsi_dev_t *dev;
 
-	unsigned char sense_key;
-	unsigned char asc;      /* additional sense code */
-	unsigned char ascq;     /* additional sense code qualifier */
+	int sense_key;
+	int asc;      /* additional sense code */
+	int ascq;     /* additional sense code qualifier */
 	unsigned long sense_data_size;
 
 	ei = cp->err_info;
@@ -1915,14 +1955,9 @@ static void complete_scsi_command(struct CommandList *cp)
 	switch (ei->CommandStatus) {
 
 	case CMD_TARGET_STATUS:
-		if (ei->ScsiStatus) {
-			/* Get sense key */
-			sense_key = 0xf & ei->SenseInfo[2];
-			/* Get additional sense code */
-			asc = ei->SenseInfo[12];
-			/* Get addition sense code qualifier */
-			ascq = ei->SenseInfo[13];
-		}
+		if (ei->ScsiStatus)
+			decode_sense_data(ei->SenseInfo, sense_data_size,
+				&sense_key, &asc, &ascq);
 		if (ei->ScsiStatus == SAM_STAT_CHECK_CONDITION) {
 			if (sense_key == ABORTED_COMMAND) {
 				cmd->result |= DID_SOFT_ERROR << 16;
@@ -2186,14 +2221,20 @@ static void hpsa_scsi_interpret_error(struct ctlr_info *h,
 {
 	const struct ErrorInfo *ei = cp->err_info;
 	struct device *d = &cp->h->pdev->dev;
-	const u8 *sd = ei->SenseInfo;
+	int sense_key, asc, ascq, sense_len;
 
 	switch (ei->CommandStatus) {
 	case CMD_TARGET_STATUS:
+		if (ei->SenseLen > sizeof(ei->SenseInfo))
+			sense_len = sizeof(ei->SenseInfo);
+		else
+			sense_len = ei->SenseLen;
+		decode_sense_data(ei->SenseInfo, sense_len,
+					&sense_key, &asc, &ascq);
 		hpsa_print_cmd(h, "SCSI status", cp);
 		if (ei->ScsiStatus == SAM_STAT_CHECK_CONDITION)
 			dev_warn(d, "SCSI Status = 02, Sense key = %02x, ASC = %02x, ASCQ = %02x\n",
-				sd[2] & 0x0f, sd[12], sd[13]);
+				sense_key, asc, ascq);
 		else
 			dev_warn(d, "SCSI Status = %02x\n", ei->ScsiStatus);
 		if (ei->ScsiStatus == 0)
@@ -2736,7 +2777,8 @@ static int hpsa_volume_offline(struct ctlr_info *h,
 					unsigned char scsi3addr[])
 {
 	struct CommandList *c;
-	unsigned char *sense, sense_key, asc, ascq;
+	unsigned char *sense;
+	int sense_key, asc, ascq, sense_len;
 	int rc, ldstat = 0;
 	u16 cmd_status;
 	u8 scsi_status;
@@ -2754,9 +2796,11 @@ static int hpsa_volume_offline(struct ctlr_info *h,
 		return 0;
 	}
 	sense = c->err_info->SenseInfo;
-	sense_key = sense[2];
-	asc = sense[12];
-	ascq = sense[13];
+	if (c->err_info->SenseLen > sizeof(c->err_info->SenseInfo))
+		sense_len = sizeof(c->err_info->SenseInfo);
+	else
+		sense_len = c->err_info->SenseLen;
+	decode_sense_data(sense, sense_len, &sense_key, &asc, &ascq);
 	cmd_status = c->err_info->CommandStatus;
 	scsi_status = c->err_info->ScsiStatus;
 	cmd_free(h, c);
