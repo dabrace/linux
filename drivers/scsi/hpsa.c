@@ -4029,18 +4029,14 @@ static int hpsa_scsi_ioaccel_direct_map(struct ctlr_info *h,
  * Set encryption parameters for the ioaccel2 request
  */
 static void set_encrypt_ioaccel2(struct ctlr_info *h,
-	struct CommandList *c, struct io_accel2_cmd *cp)
+	struct CommandList *c, struct io_accel2_cmd *cp, u16 dekindex)
 {
 	struct scsi_cmnd *cmd = c->scsi_cmd;
 	struct hpsa_scsi_dev_t *dev = cmd->device->hostdata;
 	struct raid_map_data *map = &dev->raid_map;
 	u64 first_block;
 
-	/* Are we doing encryption on this device */
-	if (!(map->flags & RAID_MAP_FLAG_ENCRYPT_ON))
-		return;
-	/* Set the data encryption key index. */
-	cp->dekindex = map->dekindex;
+	cp->dekindex = dekindex;
 
 	/* Set the encryption enable flag, encoded into direction field. */
 	cp->direction |= IOACCEL2_DIRECTION_ENCRYPT_MASK;
@@ -4238,7 +4234,8 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 	}
 
 	/* Set encryption parameters, if necessary */
-	set_encrypt_ioaccel2(h, c, cp);
+	if (phys_disk->raid_map.flags & RAID_MAP_FLAG_ENCRYPT_ON)
+		set_encrypt_ioaccel2(h, c, cp, phys_disk->raid_map.dekindex);
 
 	cp->scsi_nexus = ioaccel_handle;
 	cp->Tag = c->cmdindex << DIRECT_LOOKUP_SHIFT;
