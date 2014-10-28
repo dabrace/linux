@@ -863,25 +863,35 @@ static inline u32 next_command(struct ctlr_info *h, u8 q)
  * set bit 0 for pull model, bits 3-1 for block fetch
  * register number
  */
-static void set_performant_mode(struct ctlr_info *h, struct CommandList *c)
+#define DEFAULT_REPLY_QUEUE (-1)
+static void set_performant_mode(struct ctlr_info *h, struct CommandList *c,
+					int reply_queue)
 {
 	if (likely(h->transMethod & CFGTBL_Trans_Performant)) {
 		c->busaddr |= 1 | (h->blockFetchTable[c->Header.SGList] << 1);
-		if (likely(h->msix_vector > 0))
+		if (unlikely(!h->msix_vector))
+			return;
+		if (likely(reply_queue == DEFAULT_REPLY_QUEUE))
 			c->Header.ReplyQueue =
 				raw_smp_processor_id() % h->nreply_queues;
+		else
+			c->Header.ReplyQueue = reply_queue % h->nreply_queues;
 	}
 }
 
 static void set_ioaccel1_performant_mode(struct ctlr_info *h,
-						struct CommandList *c)
+						struct CommandList *c,
+						int reply_queue)
 {
 	struct io_accel1_cmd *cp = &h->ioaccel_cmd_pool[c->cmdindex];
 
 	/* Tell the controller to post the reply to the queue for this
 	 * processor.  This seems to give the best I/O throughput.
 	 */
-	cp->ReplyQueue = smp_processor_id() % h->nreply_queues;
+	if (likely(reply_queue == DEFAULT_REPLY_QUEUE))
+		cp->ReplyQueue = smp_processor_id() % h->nreply_queues;
+	else
+		cp->ReplyQueue = reply_queue % h->nreply_queues;
 	/* Set the bits in the address sent down to include:
 	 *  - performant mode bit (bit 0)
 	 *  - pull count (bits 1-3)
@@ -892,14 +902,18 @@ static void set_ioaccel1_performant_mode(struct ctlr_info *h,
 }
 
 static void set_ioaccel2_performant_mode(struct ctlr_info *h,
-						struct CommandList *c)
+						struct CommandList *c,
+						int reply_queue)
 {
 	struct io_accel2_cmd *cp = &h->ioaccel2_cmd_pool[c->cmdindex];
 
 	/* Tell the controller to post the reply to the queue for this
 	 * processor.  This seems to give the best I/O throughput.
 	 */
-	cp->reply_queue = smp_processor_id() % h->nreply_queues;
+	if (likely(reply_queue == DEFAULT_REPLY_QUEUE))
+		cp->reply_queue = smp_processor_id() % h->nreply_queues;
+	else
+		cp->reply_queue = reply_queue % h->nreply_queues;
 	/* Set the bits in the address sent down to include:
 	 *  - performant mode bit not used in ioaccel mode 2
 	 *  - pull count (bits 0-3)
@@ -937,24 +951,30 @@ static void dial_up_lockup_detection_on_fw_flash_complete(struct ctlr_info *h,
 		h->heartbeat_sample_interval = HEARTBEAT_SAMPLE_INTERVAL;
 }
 
-static void enqueue_cmd_and_start_io(struct ctlr_info *h,
-	struct CommandList *c)
+static void __enqueue_cmd_and_start_io(struct ctlr_info *h,
+	struct CommandList *c, int reply_queue)
 {
 	dial_down_lockup_detection_during_fw_flash(h, c);
 	atomic_inc(&h->commands_outstanding);
 	switch (c->cmd_type) {
 	case CMD_IOACCEL1:
-		set_ioaccel1_performant_mode(h, c);
+		set_ioaccel1_performant_mode(h, c, reply_queue);
 		writel(c->busaddr, h->vaddr + SA5_REQUEST_PORT_OFFSET);
 		break;
 	case CMD_IOACCEL2:
-		set_ioaccel2_performant_mode(h, c);
+		set_ioaccel2_performant_mode(h, c, reply_queue);
 		writel(c->busaddr, h->vaddr + IOACCEL2_INBOUND_POSTQ_32);
 		break;
 	default:
-		set_performant_mode(h, c);
+		set_performant_mode(h, c, reply_queue);
 		h->access.submit_command(h, c);
 	}
+}
+
+static void enqueue_cmd_and_start_io(struct ctlr_info *h,
+					struct CommandList *c)
+{
+	__enqueue_cmd_and_start_io(h, c, DEFAULT_REPLY_QUEUE);
 }
 
 static inline int is_hba_lunid(unsigned char scsi3addr[])
@@ -2013,14 +2033,20 @@ static int hpsa_map_one(struct pci_dev *pdev,
 	return 0;
 }
 
-static inline void hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
-	struct CommandList *c)
+static inline void __hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
+	struct CommandList *c, int reply_queue)
 {
 	DECLARE_COMPLETION_ONSTACK(wait);
 
 	c->waiting = &wait;
-	enqueue_cmd_and_start_io(h, c);
+	__enqueue_cmd_and_start_io(h, c, reply_queue);
 	wait_for_completion(&wait);
+}
+
+static inline void hpsa_scsi_do_simple_cmd_core(struct ctlr_info *h,
+	struct CommandList *c)
+{
+	__hpsa_scsi_do_simple_cmd_core(h, c, DEFAULT_REPLY_QUEUE);
 }
 
 static u32 lockup_detected(struct ctlr_info *h)
