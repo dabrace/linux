@@ -4268,7 +4268,6 @@ static int hpsa_ciss_submit(struct ctlr_info *h,
 	/* Fill in the request block... */
 
 	c->Request.Timeout = 0;
-	memset(c->Request.CDB, 0, sizeof(c->Request.CDB));
 	BUG_ON(cmd->cmd_len > sizeof(c->Request.CDB));
 	c->Request.CDBLen = cmd->cmd_len;
 	memcpy(c->Request.CDB, cmd->cmnd, cmd->cmd_len);
@@ -4319,7 +4318,7 @@ static int hpsa_ciss_submit(struct ctlr_info *h,
 	return 0;
 }
 
-static inline void hpsa_cmd_init(struct ctlr_info *h, int index,
+static void hpsa_cmd_init(struct ctlr_info *h, int index,
 				struct CommandList *c)
 {
 	dma_addr_t cmd_dma_handle, err_dma_handle;
@@ -4339,6 +4338,26 @@ static inline void hpsa_cmd_init(struct ctlr_info *h, int index,
 	c->h = h;
 }
 
+static void hpsa_preinitialize_commands(struct ctlr_info *h)
+{
+	int i;
+
+	for (i = 0; i < h->nr_cmds; i++) {
+		struct CommandList *c = h->cmd_pool + i;
+		hpsa_cmd_init(h, i, c);
+	}
+}
+
+static inline void hpsa_cmd_partial_init(struct ctlr_info *h, int index,
+				struct CommandList *c)
+{
+	dma_addr_t cmd_dma_handle = h->cmd_pool_dhandle + index * sizeof(*c);
+
+	memset(c->Request.CDB, 0, sizeof(c->Request.CDB));
+	memset(c->err_info, 0, sizeof(*c->err_info));
+	c->busaddr = (u32) cmd_dma_handle;
+}
+
 static void hpsa_command_resubmit_worker(struct work_struct *work)
 {
 	struct scsi_cmnd *cmd;
@@ -4353,7 +4372,7 @@ static void hpsa_command_resubmit_worker(struct work_struct *work)
 		cmd->scsi_done(cmd);
 		return;
 	}
-	hpsa_cmd_init(c->h, c->cmdindex, c);
+	hpsa_cmd_partial_init(c->h, c->cmdindex, c);
 	if (hpsa_ciss_submit(c->h, c, cmd, dev->scsi3addr)) {
 		/*
 		 * If we get here, it means dma mapping failed. Try
@@ -4473,10 +4492,11 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 		h->acciopath_status)) {
 
 		cmd->host_scribble = (unsigned char *) c;
-		c->cmd_type = CMD_SCSI;
-		c->scsi_cmd = cmd;
 
 		if (dev->offload_enabled) {
+			hpsa_cmd_init(h, c->cmdindex, c);
+			c->cmd_type = CMD_SCSI;
+			c->scsi_cmd = cmd;
 			rc = hpsa_scsi_ioaccel_raid_map(h, c);
 			if (rc == 0)
 				return 0; /* Sent on ioaccel path */
@@ -4485,6 +4505,9 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 				return SCSI_MLQUEUE_HOST_BUSY;
 			}
 		} else if (dev->ioaccel_handle) {
+			hpsa_cmd_init(h, c->cmdindex, c);
+			c->cmd_type = CMD_SCSI;
+			c->scsi_cmd = cmd;
 			rc = hpsa_scsi_ioaccel_direct_map(h, c);
 			if (rc == 0)
 				return 0; /* Sent on direct map path */
@@ -5104,7 +5127,7 @@ static struct CommandList *cmd_alloc(struct ctlr_info *h)
 		break; /* it's ours now. */
 	}
 	h->last_allocation = i; /* benignly racy */
-	hpsa_cmd_init(h, i, c);
+	hpsa_cmd_partial_init(h, i, c);
 	return c;
 }
 
@@ -6818,6 +6841,7 @@ static int hpsa_allocate_cmd_pool(struct ctlr_info *h)
 		dev_err(&h->pdev->dev, "out of memory in %s", __func__);
 		return -ENOMEM;
 	}
+	hpsa_preinitialize_commands(h);
 	return 0;
 }
 
