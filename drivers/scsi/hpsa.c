@@ -2757,6 +2757,49 @@ static int hpsa_volume_offline(struct ctlr_info *h,
 	return 0;
 }
 
+/* Find out if a logical device supports aborts by simply trying one.
+ * Smart Array may claim not to support aborts on logical drives, but
+ * if a MSA2000 * is connected, the drives on that will be presented
+ * by the Smart Array as logical drives, and aborts may be sent to
+ * those devices successfully.  So the simplest way to find out is
+ * to simply try an abort and see how the device responds.
+ */
+static int hpsa_device_supports_aborts(struct ctlr_info *h,
+					unsigned char *scsi3addr)
+{
+	struct CommandList *c;
+	struct ErrorInfo *ei;
+	int rc = 0;
+
+	u64 tag = (u64) -1; /* bogus tag */
+
+	/* Assume that physical devices support aborts */
+	if (!is_logical_dev_addr_mode(scsi3addr))
+		return 1;
+
+	c = cmd_alloc(h);
+	if (!c)
+		return -ENOMEM;
+	(void) fill_cmd(c, HPSA_ABORT_MSG, h, &tag, 0, 0, scsi3addr, TYPE_MSG);
+	(void) __hpsa_scsi_do_simple_cmd_core(h, c, 0, NO_TIMEOUT);
+	/* no unmap needed here because no data xfer. */
+	ei = c->err_info;
+	switch (ei->CommandStatus) {
+	case CMD_INVALID:
+		rc = 0;
+		break;
+	case CMD_UNABORTABLE:
+	case CMD_ABORT_FAILED:
+		rc = 1;
+		break;
+	default:
+		rc = 0;
+		break;
+	}
+	cmd_free(h, c);
+	return rc;
+}
+
 static int hpsa_update_device_info(struct ctlr_info *h,
 	unsigned char scsi3addr[], struct hpsa_scsi_dev_t *this_device,
 	unsigned char *is_OBDR_device)
@@ -2821,8 +2864,11 @@ static int hpsa_update_device_info(struct ctlr_info *h,
 					strncmp(obdr_sig, OBDR_TAPE_SIG,
 						OBDR_SIG_LEN) == 0);
 	}
-
 	kfree(inq_buff);
+	this_device->supports_aborts =
+			hpsa_device_supports_aborts(h, scsi3addr);
+	if (this_device->supports_aborts < 0)
+		this_device->supports_aborts = 0;
 	return 0;
 
 bail_out:
@@ -4618,7 +4664,7 @@ static int hpsa_send_abort(struct ctlr_info *h, unsigned char *scsi3addr,
 	}
 
 	/* fill_cmd can't fail here, no buffer to map */
-	(void) fill_cmd(c, HPSA_ABORT_MSG, h, abort,
+	(void) fill_cmd(c, HPSA_ABORT_MSG, h, &abort->Header.tag,
 		0, 0, scsi3addr, TYPE_MSG);
 	if (swizzle)
 		swizzle_abort_tag(&c->Request.CDB[4]);
@@ -4808,6 +4854,13 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	if (refcount == 1) { /* Command is done already. */
 		cmd_free(h, abort);
 		return SUCCESS;
+	}
+
+	/* Don't bother trying the abort if we know it won't work. */
+	if (abort->cmd_type != CMD_IOACCEL2 &&
+		abort->cmd_type != CMD_IOACCEL1 && !dev->supports_aborts) {
+		cmd_free(h, abort);
+		return FAILED;
 	}
 
 	/* Check that we're aborting the right command.
@@ -5381,7 +5434,7 @@ static int fill_cmd(struct CommandList *c, u8 cmd, struct ctlr_info *h,
 	int cmd_type)
 {
 	int pci_dir = XFER_NONE;
-	struct CommandList *a; /* for commands to be aborted */
+	u64 tag; /* for commands to be aborted */
 	u32 tupper, tlower;
 
 	c->cmd_type = CMD_IOCTL_PEND;
@@ -5498,11 +5551,11 @@ static int fill_cmd(struct CommandList *c, u8 cmd, struct ctlr_info *h,
 			c->Request.CDB[7] = 0x00;
 			break;
 		case  HPSA_ABORT_MSG:
-			a = buff;       /* point to command to be aborted */
+			memcpy(&tag, buff, sizeof(tag));
 			dev_dbg(&h->pdev->dev, "Abort Tag:0x%016llx using request Tag:0x%016llx",
-				a->Header.tag, c->Header.tag);
-			tlower = (u32) (a->Header.tag >> 32);
-			tupper = (u32) (a->Header.tag & 0x0ffffffffULL);
+				tag, c->Header.tag);
+			tlower = (u32) (tag >> 32);
+			tupper = (u32) (tag & 0x0ffffffffULL);
 			c->Request.CDBLen = 16;
 			c->Request.type_attr_dir =
 					TYPE_ATTR_DIR(cmd_type,
