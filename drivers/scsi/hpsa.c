@@ -7773,8 +7773,8 @@ reinit_after_soft_reset:
 		goto reinit_after_soft_reset;
 	}
 
-		/* Enable Accelerated IO path at driver layer */
-		h->acciopath_status = 1;
+	/* Enable Accelerated IO path at driver layer */
+	h->acciopath_status = 1;
 
 	h->lockup_detector_enabled = 1;
 
