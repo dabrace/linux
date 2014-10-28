@@ -6790,6 +6790,15 @@ static int hpsa_find_cfg_addrs(struct pci_dev *pdev, void __iomem *vaddr,
 	return 0;
 }
 
+static void hpsa_free_cfgtables(struct ctlr_info *h)
+{
+	iounmap(h->transtable);
+	iounmap(h->cfgtable);
+}
+
+/* Find and map CISS config table and transfer table
++ * several items must be unmapped (freed) later
++ * */
 static int hpsa_find_cfgtables(struct ctlr_info *h)
 {
 	u64 cfg_offset;
@@ -6814,8 +6823,11 @@ static int hpsa_find_cfgtables(struct ctlr_info *h)
 	h->transtable = remap_pci_mem(pci_resource_start(h->pdev,
 				cfg_base_addr_index)+cfg_offset+trans_offset,
 				sizeof(*h->transtable));
-	if (!h->transtable)
+	if (!h->transtable) {
+		dev_err(&h->pdev->dev, "Failed mapping transfer table\n");
+		hpsa_free_cfgtables(h);
 		return -ENOMEM;
+	}
 	return 0;
 }
 
@@ -7289,15 +7301,11 @@ static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 	kfree(h->ioaccel1_blockFetchTable);
 	kfree(h->blockFetchTable);
 	hpsa_free_reply_queues(h);
-	if (h->vaddr)
-		iounmap(h->vaddr);
-	if (h->transtable)
-		iounmap(h->transtable);
-	if (h->cfgtable)
-		iounmap(h->cfgtable);
-	hpsa_disable_interrupt_mode(h);
+	hpsa_free_cfgtables(h);			/* pci_init 4 */
+	iounmap(h->vaddr);			/* pci_init 3 */
+	hpsa_disable_interrupt_mode(h);		/* pci_init 2 */
 	pci_disable_device(h->pdev);
-	pci_release_regions(h->pdev);
+	pci_release_regions(h->pdev);		/* pci_init 2 */
 	kfree(h);
 }
 
