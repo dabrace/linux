@@ -1989,6 +1989,21 @@ static void complete_scsi_command(struct CommandList *cp)
 		dev_warn(&h->pdev->dev, "cp %p returned unknown status %x\n",
 				cp, ei->CommandStatus);
 	}
+
+	/* Prevent the following race in the abort handler:
+	 *
+	 * 1. LLD is requested to abort a scsi command
+	 * 2. scsi command completes
+	 * 3. The struct CommandList associated with 2 is made available.
+	 * 4. new io request to LLD to another LUN re-uses struct CommandList
+	 * 5. abort handler follows scsi_cmnd->host_scribble and
+	 *    finds struct CommandList and tries to aborts it.
+	 * Now we have aborted the wrong command.
+	 * Clear cp->scsi_cmd here so that if this get re-used, the abort
+	 * handler will know it's a different scsi_cmnd.
+	 */
+	cp->scsi_cmd = NULL;
+
 	cmd_free(h, cp);
 	cmd->scsi_done(cmd);
 }
@@ -4748,6 +4763,15 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		cmd_free(h, abort);
 		return SUCCESS;
 	}
+
+	/* Check that we're aborting the right command.
+	 * It's possible the CommandList already completed and got re-used.
+	 */
+	if (abort->scsi_cmd != sc) {
+		cmd_free(h, abort);
+		return SUCCESS;
+	}
+
 	hpsa_get_tag(h, abort, &taglower, &tagupper);
 	reply_queue = hpsa_extract_reply_queue(h, abort);
 	ml += sprintf(msg+ml, "Tag:0x%08x:%08x ", tagupper, taglower);
