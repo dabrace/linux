@@ -4384,6 +4384,41 @@ static inline void hpsa_cmd_partial_init(struct ctlr_info *h, int index,
 	c->busaddr = (u32) cmd_dma_handle;
 }
 
+static int hpsa_ioaccel_submit(struct ctlr_info *h,
+		struct CommandList *c, struct scsi_cmnd *cmd,
+		unsigned char *scsi3addr)
+{
+	struct hpsa_scsi_dev_t *dev = cmd->device->hostdata;
+	int rc = IO_ACCEL_INELIGIBLE;
+
+	cmd->host_scribble = (unsigned char *) c;
+
+	if (dev->offload_enabled) {
+		hpsa_cmd_init(h, c->cmdindex, c);
+		c->cmd_type = CMD_SCSI;
+		c->scsi_cmd = cmd;
+		rc = hpsa_scsi_ioaccel_raid_map(h, c);
+		if (rc == 0)
+			return 0; /* Sent on ioaccel path */
+		if (rc < 0) {   /* scsi_dma_map failed. */
+			cmd_free(h, c);
+			return SCSI_MLQUEUE_HOST_BUSY;
+		}
+	} else if (dev->ioaccel_handle) {
+		hpsa_cmd_init(h, c->cmdindex, c);
+		c->cmd_type = CMD_SCSI;
+		c->scsi_cmd = cmd;
+		rc = hpsa_scsi_ioaccel_direct_map(h, c);
+		if (rc == 0)
+			return 0; /* Sent on direct map path */
+		if (rc < 0) {   /* scsi_dma_map failed. */
+			cmd_free(h, c);
+			return SCSI_MLQUEUE_HOST_BUSY;
+		}
+	}
+	return rc;
+}
+
 static void hpsa_command_resubmit_worker(struct work_struct *work)
 {
 	struct scsi_cmnd *cmd;
@@ -4516,32 +4551,11 @@ static int hpsa_scsi_queue_command(struct Scsi_Host *sh, struct scsi_cmnd *cmd)
 	if (likely(cmd->retries == 0 &&
 		cmd->request->cmd_type == REQ_TYPE_FS &&
 		h->acciopath_status)) {
-
-		cmd->host_scribble = (unsigned char *) c;
-
-		if (dev->offload_enabled) {
-			hpsa_cmd_init(h, c->cmdindex, c);
-			c->cmd_type = CMD_SCSI;
-			c->scsi_cmd = cmd;
-			rc = hpsa_scsi_ioaccel_raid_map(h, c);
-			if (rc == 0)
-				return 0; /* Sent on ioaccel path */
-			if (rc < 0) {   /* scsi_dma_map failed. */
-				cmd_free(h, c);
-				return SCSI_MLQUEUE_HOST_BUSY;
-			}
-		} else if (dev->ioaccel_handle) {
-			hpsa_cmd_init(h, c->cmdindex, c);
-			c->cmd_type = CMD_SCSI;
-			c->scsi_cmd = cmd;
-			rc = hpsa_scsi_ioaccel_direct_map(h, c);
-			if (rc == 0)
-				return 0; /* Sent on direct map path */
-			if (rc < 0) {   /* scsi_dma_map failed. */
-				cmd_free(h, c);
-				return SCSI_MLQUEUE_HOST_BUSY;
-			}
-		}
+		rc = hpsa_ioaccel_submit(h, c, cmd, scsi3addr);
+		if (rc == 0)
+			return 0;
+		if (rc < 0)
+			return SCSI_MLQUEUE_HOST_BUSY;
 	}
 	return hpsa_ciss_submit(h, c, cmd, scsi3addr);
 }
