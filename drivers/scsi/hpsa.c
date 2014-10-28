@@ -1815,6 +1815,46 @@ static void hpsa_slave_destroy(struct scsi_device *sdev)
 	/* nothing to do. */
 }
 
+static void hpsa_free_ioaccel2_sg_chain_blocks(struct ctlr_info *h)
+{
+	int i;
+
+	if (!h->ioaccel2_cmd_sg_list)
+		return;
+	for (i = 0; i < h->nr_cmds; i++) {
+		kfree(h->ioaccel2_cmd_sg_list[i]);
+		h->ioaccel2_cmd_sg_list[i] = NULL;
+	}
+	kfree(h->ioaccel2_cmd_sg_list);
+	h->ioaccel2_cmd_sg_list = NULL;
+}
+
+static int hpsa_allocate_ioaccel2_sg_chain_blocks(struct ctlr_info *h)
+{
+	int i;
+
+	if (h->chainsize <= 0)
+		return 0;
+
+	h->ioaccel2_cmd_sg_list =
+		kzalloc(sizeof(*h->ioaccel2_cmd_sg_list) * h->nr_cmds,
+					GFP_KERNEL);
+	if (!h->ioaccel2_cmd_sg_list)
+		return -ENOMEM;
+	for (i = 0; i < h->nr_cmds; i++) {
+		h->ioaccel2_cmd_sg_list[i] =
+			kmalloc(sizeof(*h->ioaccel2_cmd_sg_list[i]) *
+					h->maxsgentries, GFP_KERNEL);
+		if (!h->ioaccel2_cmd_sg_list[i])
+			goto clean;
+	}
+	return 0;
+
+clean:
+	hpsa_free_ioaccel2_sg_chain_blocks(h);
+	return -ENOMEM;
+}
+
 static void hpsa_free_sg_chain_blocks(struct ctlr_info *h)
 {
 	int i;
@@ -1851,6 +1891,39 @@ static int hpsa_allocate_sg_chain_blocks(struct ctlr_info *h)
 clean:
 	hpsa_free_sg_chain_blocks(h);
 	return -ENOMEM;
+}
+
+static int hpsa_map_ioaccel2_sg_chain_block(struct ctlr_info *h,
+	struct io_accel2_cmd *cp, struct CommandList *c)
+{
+	struct ioaccel2_sg_element *chain_block;
+	u64 temp64;
+	u32 chain_size;
+
+	chain_block = h->ioaccel2_cmd_sg_list[c->cmdindex];
+	chain_size = le32_to_cpu(cp->data_len);
+	temp64 = pci_map_single(h->pdev, chain_block, chain_size,
+				PCI_DMA_TODEVICE);
+	if (dma_mapping_error(&h->pdev->dev, temp64)) {
+		/* prevent subsequent unmapping */
+		cp->sg->address = 0;
+		return -1;
+	}
+	cp->sg->address = (u64) cpu_to_le64(temp64);
+	return 0;
+}
+
+static void hpsa_unmap_ioaccel2_sg_chain_block(struct ctlr_info *h,
+	struct io_accel2_cmd *cp)
+{
+	struct ioaccel2_sg_element *chain_sg;
+	u64 temp64;
+	u32 chain_size;
+
+	chain_sg = cp->sg;
+	temp64 = le64_to_cpu(chain_sg->address);
+	chain_size = le32_to_cpu(cp->data_len);
+	pci_unmap_single(h->pdev, temp64, chain_size, PCI_DMA_TODEVICE);
 }
 
 static int hpsa_map_sg_chain_block(struct ctlr_info *h,
@@ -1994,6 +2067,9 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 		struct hpsa_scsi_dev_t *dev)
 {
 	struct io_accel2_cmd *c2 = &h->ioaccel2_cmd_pool[c->cmdindex];
+
+	if (c2->sg[0].chain_indicator == IOACCEL2_CHAIN)
+		hpsa_unmap_ioaccel2_sg_chain_block(h, c2);
 
 	atomic_dec(&c->phys_disk->ioaccel_cmds_out);
 
@@ -3977,10 +4053,7 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 	u32 len;
 	u32 total_len = 0;
 
-	if (scsi_sg_count(cmd) > h->ioaccel_maxsg) {
-		atomic_dec(&phys_disk->ioaccel_cmds_out);
-		return IO_ACCEL_INELIGIBLE;
-	}
+	BUG_ON(scsi_sg_count(cmd) > h->maxsgentries);
 
 	if (fixup_ioaccel_cdb(cdb, &cdb_len)) {
 		atomic_dec(&phys_disk->ioaccel_cmds_out);
@@ -4010,8 +4083,18 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 	}
 
 	if (use_sg) {
-		BUG_ON(use_sg > IOACCEL2_MAXSGENTRIES);
 		curr_sg = cp->sg;
+		if (use_sg > h->ioaccel_maxsg) {
+			addr64 = h->ioaccel2_cmd_sg_list[c->cmdindex]->address;
+			curr_sg->address = cpu_to_le64(addr64);
+			curr_sg->length = 0;
+			curr_sg->reserved[0] = 0;
+			curr_sg->reserved[1] = 0;
+			curr_sg->reserved[2] = 0;
+			curr_sg->chain_indicator = 0x80;
+
+			curr_sg = h->ioaccel2_cmd_sg_list[c->cmdindex];
+		}
 		scsi_for_each_sg(cmd, sg, use_sg, i) {
 			addr64 = (u64) sg_dma_address(sg);
 			len  = sg_dma_len(sg);
@@ -4056,13 +4139,22 @@ static int hpsa_scsi_ioaccel2_queue_command(struct ctlr_info *h,
 	cp->Tag = c->cmdindex << DIRECT_LOOKUP_SHIFT;
 	memcpy(cp->cdb, cdb, sizeof(cp->cdb));
 
-	/* fill in sg elements */
-	cp->sg_count = (u8) use_sg;
-
 	cp->data_len = cpu_to_le32(total_len);
 	cp->err_ptr = cpu_to_le64(c->busaddr +
 			offsetof(struct io_accel2_cmd, error_data));
 	cp->err_len = cpu_to_le32((u32) sizeof(cp->error_data));
+
+	/* fill in sg elements */
+	if (use_sg > h->ioaccel_maxsg) {
+		cp->sg_count = 1;
+		if (hpsa_map_ioaccel2_sg_chain_block(h, cp, c)) {
+			atomic_dec(&phys_disk->ioaccel_cmds_out);
+			scsi_dma_unmap(cmd);
+			return -1;
+		}
+	} else {
+		cp->sg_count = (u8) use_sg;
+	}
 
 	enqueue_cmd_and_start_io(h, c);
 	return 0;
@@ -7208,6 +7300,7 @@ static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 {
 	hpsa_free_irqs_and_disable_msix(h);
 	hpsa_free_sg_chain_blocks(h);
+	hpsa_free_ioaccel2_sg_chain_blocks(h);
 	hpsa_free_cmd_pool(h);
 	kfree(h->ioaccel1_blockFetchTable);
 	kfree(h->blockFetchTable);
@@ -7795,6 +7888,7 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	iounmap(h->cfgtable);
 	hpsa_free_device_info(h);
 	hpsa_free_sg_chain_blocks(h);
+	hpsa_free_ioaccel2_sg_chain_blocks(h);
 	pci_free_consistent(h->pdev,
 		h->nr_cmds * sizeof(struct CommandList),
 		h->cmd_pool, h->cmd_pool_dhandle);
@@ -8101,6 +8195,9 @@ static int ioaccel2_alloc_cmds_and_bft(struct ctlr_info *h)
 
 	if ((h->ioaccel2_cmd_pool == NULL) ||
 		(h->ioaccel2_blockFetchTable == NULL))
+		goto clean_up;
+
+	if (hpsa_allocate_ioaccel2_sg_chain_blocks(h))
 		goto clean_up;
 
 	memset(h->ioaccel2_cmd_pool, 0,
