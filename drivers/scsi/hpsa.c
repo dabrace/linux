@@ -856,19 +856,21 @@ static void dial_up_lockup_detection_on_fw_flash_complete(struct ctlr_info *h,
 static void enqueue_cmd_and_start_io(struct ctlr_info *h,
 	struct CommandList *c)
 {
+	dial_down_lockup_detection_during_fw_flash(h, c);
+	atomic_inc(&h->commands_outstanding);
 	switch (c->cmd_type) {
 	case CMD_IOACCEL1:
 		set_ioaccel1_performant_mode(h, c);
+		writel(c->busaddr, h->vaddr + SA5_REQUEST_PORT_OFFSET);
 		break;
 	case CMD_IOACCEL2:
 		set_ioaccel2_performant_mode(h, c);
+		writel(c->busaddr, h->vaddr + IOACCEL2_INBOUND_POSTQ_32);
 		break;
 	default:
 		set_performant_mode(h, c);
+		h->access.submit_command(h, c);
 	}
-	dial_down_lockup_detection_during_fw_flash(h, c);
-	atomic_inc(&h->commands_outstanding);
-	h->access.submit_command(h, c);
 }
 
 static inline int is_hba_lunid(unsigned char scsi3addr[])
@@ -5125,35 +5127,6 @@ static void check_ioctl_unit_attention(struct ctlr_info *h,
 		(void) check_for_unit_attention(h, c);
 }
 
-static int increment_passthru_count(struct ctlr_info *h)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&h->passthru_count_lock, flags);
-	if (h->passthru_count >= HPSA_MAX_CONCURRENT_PASSTHRUS) {
-		spin_unlock_irqrestore(&h->passthru_count_lock, flags);
-		return -1;
-	}
-	h->passthru_count++;
-	spin_unlock_irqrestore(&h->passthru_count_lock, flags);
-	return 0;
-}
-
-static void decrement_passthru_count(struct ctlr_info *h)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&h->passthru_count_lock, flags);
-	if (h->passthru_count <= 0) {
-		spin_unlock_irqrestore(&h->passthru_count_lock, flags);
-		/* not expecting to get here. */
-		dev_warn(&h->pdev->dev, "Bug detected, passthru_count seems to be incorrect.\n");
-		return;
-	}
-	h->passthru_count--;
-	spin_unlock_irqrestore(&h->passthru_count_lock, flags);
-}
-
 /*
  * ioctl
  */
@@ -5176,16 +5149,16 @@ static int hpsa_ioctl(struct scsi_device *dev, int cmd, void *arg)
 	case CCISS_GETDRIVVER:
 		return hpsa_getdrivver_ioctl(h, argp);
 	case CCISS_PASSTHRU:
-		if (increment_passthru_count(h))
+		if (atomic_dec_if_positive(&h->passthru_cmds_avail) < 0)
 			return -EAGAIN;
 		rc = hpsa_passthru_ioctl(h, argp);
-		decrement_passthru_count(h);
+		atomic_inc(&h->passthru_cmds_avail);
 		return rc;
 	case CCISS_BIG_PASSTHRU:
-		if (increment_passthru_count(h))
+		if (atomic_dec_if_positive(&h->passthru_cmds_avail) < 0)
 			return -EAGAIN;
 		rc = hpsa_big_passthru_ioctl(h, argp);
-		decrement_passthru_count(h);
+		atomic_inc(&h->passthru_cmds_avail);
 		return rc;
 	default:
 		return -ENOTTY;
@@ -6627,16 +6600,17 @@ static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 /* Called when controller lockup detected. */
 static void fail_all_outstanding_cmds(struct ctlr_info *h)
 {
-	int i;
-	struct CommandList *c = NULL;
+	int i, refcount;
+	struct CommandList *c;
 
 	for (i = 0; i < h->nr_cmds; i++) {
-		if (!test_bit(i & (BITS_PER_LONG - 1),
-				h->cmd_pool_bits + (i / BITS_PER_LONG)))
-			continue;
 		c = h->cmd_pool + i;
-		c->err_info->CommandStatus = CMD_HARDWARE_ERR;
-		finish_cmd(c);
+		refcount = atomic_inc_return(&c->refcount);
+		if (refcount > 1) {
+			c->err_info->CommandStatus = CMD_HARDWARE_ERR;
+			finish_cmd(c);
+		}
+		cmd_free(h, c);
 	}
 }
 
@@ -6673,9 +6647,7 @@ static void controller_lockup_detected(struct ctlr_info *h)
 	dev_warn(&h->pdev->dev, "Controller lockup detected: 0x%08x\n",
 			lockup_detected);
 	pci_disable_device(h->pdev);
-	spin_lock_irqsave(&h->lock, flags);
 	fail_all_outstanding_cmds(h);
-	spin_unlock_irqrestore(&h->lock, flags);
 }
 
 static void detect_controller_lockup(struct ctlr_info *h)
@@ -6944,7 +6916,7 @@ reinit_after_soft_reset:
 	spin_lock_init(&h->lock);
 	spin_lock_init(&h->offline_device_lock);
 	spin_lock_init(&h->scan_lock);
-	spin_lock_init(&h->passthru_count_lock);
+	atomic_set(&h->passthru_cmds_avail, HPSA_MAX_CONCURRENT_PASSTHRUS);
 
 	/* Allocate and clear per-cpu variable lockup_detected */
 	h->lockup_detected = alloc_percpu(u32);
@@ -7548,18 +7520,19 @@ static void hpsa_drain_accel_commands(struct ctlr_info *h)
 {
 	struct CommandList *c = NULL;
 	int i, accel_cmds_out;
+	int refcount;
 
 	do { /* wait for all outstanding ioaccel commands to drain out */
 		accel_cmds_out = 0;
 		for (i = 0; i < h->nr_cmds; i++) {
-			if (!test_bit(i & (BITS_PER_LONG - 1),
-					h->cmd_pool_bits + (i / BITS_PER_LONG)))
-				continue;
 			c = h->cmd_pool + i;
-			accel_cmds_out += is_accelerated_cmd(c);
+			refcount = atomic_inc_return(&c->refcount);
+			if (refcount > 1) /* Command is allocated */
+				accel_cmds_out += is_accelerated_cmd(c);
+			cmd_free(h, c);
 		}
 		if (accel_cmds_out <= 0)
-				break;
+			break;
 		msleep(100);
 	} while (1);
 }
