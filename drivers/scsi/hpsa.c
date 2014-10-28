@@ -1325,16 +1325,17 @@ static void hpsa_scsi_update_entry(struct ctlr_info *h, int hostno,
 
 	dev_info(&h->pdev->dev,
 		"updated scsi %d:%d:%d:%d: %s %.8s %.16s RAID-%s SSDSmartPathCap%c En%c Exp=%d qd=%d\n",
-		hostno, new_entry->bus, new_entry->target, new_entry->lun,
-		scsi_device_type(new_entry->devtype),
-		new_entry->vendor,
-		new_entry->model,
-		new_entry->raid_level > RAID_UNKNOWN ?
-			"RAID-?" : raid_label[new_entry->raid_level],
-		new_entry->offload_config ? '+' : '-',
-		new_entry->offload_enabled ? '+' : '-',
-		new_entry->expose_state,
-		new_entry->queue_depth);
+		hostno, h->dev[entry]->bus,
+		h->dev[entry]->target, h->dev[entry]->lun,
+		scsi_device_type(h->dev[entry]->devtype),
+		h->dev[entry]->vendor,
+		h->dev[entry]->model,
+		h->dev[entry]->raid_level > RAID_UNKNOWN ?
+			"RAID-?" : raid_label[h->dev[entry]->raid_level],
+		h->dev[entry]->offload_config ? '+' : '-',
+		h->dev[entry]->offload_enabled ? '+' : '-',
+		h->dev[entry]->expose_state,
+		h->dev[entry]->queue_depth);
 }
 
 /* Replace an entry from h->dev[] array. */
