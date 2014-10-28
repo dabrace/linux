@@ -248,6 +248,7 @@ static int hpsa_scsi_ioaccel_queue_command(struct ctlr_info *h,
 	struct CommandList *c, u32 ioaccel_handle, u8 *cdb, int cdb_len,
 	u8 *scsi3addr);
 static void hpsa_command_resubmit_worker(struct work_struct *work);
+static void print_cfg_table(struct device *dev, struct CfgTable *tb);
 
 static inline struct ctlr_info *sdev_to_hba(struct scsi_device *sdev)
 {
@@ -401,6 +402,85 @@ static ssize_t host_store_rescan(struct device *dev,
 	hpsa_scan_start(h->scsi_host);
 	return count;
 }
+
+static ssize_t host_store_hpsa_intcoal_delay(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	int len;
+	unsigned int value;
+	char tmpbuf[8];
+	struct ctlr_info *h;
+	struct Scsi_Host *shost = class_to_shost(dev);
+
+	len = count > sizeof(tmpbuf) - 1 ? sizeof(tmpbuf) - 1 : count;
+	strncpy(tmpbuf, buf, len);
+	tmpbuf[len] = '\0';
+	if (sscanf(tmpbuf, "%u", &value) != 1)
+		 return -EINVAL;
+	/* the device policies the values written, so no need here */
+
+	h = shost_to_hba(shost);
+	print_cfg_table(&h->pdev->dev, h->cfgtable);
+	writel(value, &h->cfgtable->HostWrite.CoalIntDelay);
+	print_cfg_table(&h->pdev->dev, h->cfgtable);
+	writel(CFGTBL_ChangeReq, h->vaddr + SA5_DOORBELL);
+	hpsa_wait_for_mode_change_ack(h);
+	print_cfg_table(&h->pdev->dev, h->cfgtable);
+	return count;
+}
+
+static ssize_t host_store_hpsa_intcoal_count(struct device *dev,
+				    struct device_attribute *attr,
+				    const char *buf, size_t count)
+{
+	int len;
+	unsigned int value;
+	char tmpbuf[8];
+	struct ctlr_info *h;
+	struct Scsi_Host *shost = class_to_shost(dev);
+
+	len = count > sizeof(tmpbuf) - 1 ? sizeof(tmpbuf) - 1 : count;
+	strncpy(tmpbuf, buf, len);
+	tmpbuf[len] = '\0';
+	if (sscanf(tmpbuf, "%u", &value) != 1)
+		 return -EINVAL;
+	/* the device policies the values written, so no need here */
+
+	h = shost_to_hba(shost);
+	print_cfg_table(&h->pdev->dev, h->cfgtable);
+	writel(value, &h->cfgtable->HostWrite.CoalIntCount);
+	print_cfg_table(&h->pdev->dev, h->cfgtable);
+	writel(CFGTBL_ChangeReq, h->vaddr + SA5_DOORBELL);
+	hpsa_wait_for_mode_change_ack(h);
+	print_cfg_table(&h->pdev->dev, h->cfgtable);
+	return count;
+}
+
+static ssize_t host_show_hpsa_intcoal_delay(struct device *dev,
+	     struct device_attribute *attr, char *buf)
+{
+	unsigned int value;
+	struct ctlr_info *h;
+	struct Scsi_Host *shost = class_to_shost(dev);
+
+	h = shost_to_hba(shost);
+	value = readl(&h->cfgtable->HostWrite.CoalIntDelay);
+	return snprintf(buf, 20, "%u\n", value);
+}
+
+static ssize_t host_show_hpsa_intcoal_count(struct device *dev,
+	     struct device_attribute *attr, char *buf)
+{
+	unsigned int value;
+	struct ctlr_info *h;
+	struct Scsi_Host *shost = class_to_shost(dev);
+
+	h = shost_to_hba(shost);
+	value = readl(&h->cfgtable->HostWrite.CoalIntCount);
+	return snprintf(buf, 20, "%u\n", value);
+}
+
 
 static ssize_t host_show_firmware_revision(struct device *dev,
 	     struct device_attribute *attr, char *buf)
@@ -660,6 +740,8 @@ static DEVICE_ATTR(raid_level, S_IRUGO, raid_level_show, NULL);
 static DEVICE_ATTR(lunid, S_IRUGO, lunid_show, NULL);
 static DEVICE_ATTR(unique_id, S_IRUGO, unique_id_show, NULL);
 static DEVICE_ATTR(rescan, S_IWUSR, NULL, host_store_rescan);
+static DEVICE_ATTR(hpsa_intcoal_delay, S_IWUSR|S_IRUGO, host_show_hpsa_intcoal_delay, host_store_hpsa_intcoal_delay);
+static DEVICE_ATTR(hpsa_intcoal_count, S_IWUSR|S_IRUGO, host_show_hpsa_intcoal_count, host_store_hpsa_intcoal_count);
 static DEVICE_ATTR(hp_ssd_smart_path_enabled, S_IRUGO,
 			host_show_hp_ssd_smart_path_enabled, NULL);
 static DEVICE_ATTR(hp_ssd_smart_path_status, S_IWUSR|S_IRUGO|S_IROTH,
@@ -691,6 +773,8 @@ static struct device_attribute *hpsa_shost_attrs[] = {
 	&dev_attr_firmware_revision,
 	&dev_attr_commands_outstanding,
 	&dev_attr_transport_mode,
+	&dev_attr_hpsa_intcoal_delay,
+	&dev_attr_hpsa_intcoal_count,
 	&dev_attr_resettable,
 	&dev_attr_hp_ssd_smart_path_status,
 	&dev_attr_raid_offload_debug,
@@ -5857,7 +5941,6 @@ unmap_vaddr:
  */
 static void print_cfg_table(struct device *dev, struct CfgTable *tb)
 {
-#ifdef HPSA_DEBUG
 	int i;
 	char temp_name[17];
 
@@ -5887,7 +5970,6 @@ static void print_cfg_table(struct device *dev, struct CfgTable *tb)
 	dev_info(dev, "   Server Name = %s\n", temp_name);
 	dev_info(dev, "   Heartbeat Counter = 0x%x\n\n\n",
 		readl(&(tb->HeartBeat)));
-#endif				/* HPSA_DEBUG */
 }
 
 static int find_PCI_BAR_index(struct pci_dev *pdev, unsigned long pci_bar_addr)
@@ -7281,6 +7363,7 @@ static void hpsa_enter_performant_mode(struct ctlr_info *h, u32 trans_support)
 	}
 	writel(CFGTBL_ChangeReq, h->vaddr + SA5_DOORBELL);
 	hpsa_wait_for_mode_change_ack(h);
+	print_cfg_table(&h->pdev->dev, h->cfgtable);
 	register_value = readl(&(h->cfgtable->TransportActive));
 	if (!(register_value & CFGTBL_Trans_Performant)) {
 		dev_warn(&h->pdev->dev, "unable to get board into"
@@ -7356,6 +7439,7 @@ static void hpsa_enter_performant_mode(struct ctlr_info *h, u32 trans_support)
 	}
 	writel(CFGTBL_ChangeReq, h->vaddr + SA5_DOORBELL);
 	hpsa_wait_for_mode_change_ack(h);
+	print_cfg_table(&h->pdev->dev, h->cfgtable);
 }
 
 static int hpsa_alloc_ioaccel_cmd_and_bft(struct ctlr_info *h)
