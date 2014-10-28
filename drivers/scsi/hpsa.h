@@ -46,7 +46,7 @@ struct hpsa_scsi_dev_t {
 	unsigned char model[16];        /* bytes 16-31 of inquiry data */
 	unsigned char raid_level;	/* from inquiry page 0xC1 */
 	unsigned char volume_offline;	/* discovered via TUR or VPD */
-	u16 queue_depth;
+	u16 queue_depth;		/* max queue_depth for this device */
 	atomic_t ioaccel_cmds_out;	/* Only used for physical devices
 					 * counts commands sent to physical
 					 * device via "ioaccel" path.
