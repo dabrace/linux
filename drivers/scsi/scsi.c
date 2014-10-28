@@ -553,6 +553,23 @@ void scsi_log_send(struct scsi_cmnd *cmd)
 	}
 }
 
+/* Strings for internal return values in scsi.h */
+/* NEEDS_RETRY must be the lowest numbered value */
+static const char * const disposition_label[] = {
+	"NEEDS_RETRY",
+	"SUCCESS",
+	"FAILED",
+	"QUEUED",
+	"SOFT_ERROR",
+	"ADD_TO_MLQUEUE",
+	"TIMEOUT_ERROR",
+	"SCSI_RETURN_NOT_HANDLED",
+	"FAST_IO_FAIL",
+	"UNKNOWN",
+};
+#define DISPOSITION_BASE NEEDS_RETRY
+#define DISPOSITION_UNKNOWN (ARRAY_SIZE(disposition_label) - 1)
+
 void scsi_log_completion(struct scsi_cmnd *cmd, int disposition)
 {
 	unsigned int level;
@@ -574,35 +591,21 @@ void scsi_log_completion(struct scsi_cmnd *cmd, int disposition)
 				       SCSI_LOG_MLCOMPLETE_BITS);
 		if (((level > 0) && (cmd->result || disposition != SUCCESS)) ||
 		    (level > 1)) {
-			scmd_printk(KERN_INFO, cmd, "Done: ");
+			int dindex;
+
+			if (disposition >= DISPOSITION_BASE &&
+			    disposition <= DISPOSITION_BASE +
+					   DISPOSITION_UNKNOWN)
+				dindex = disposition - DISPOSITION_BASE;
+			else
+				dindex = DISPOSITION_UNKNOWN;
 			if (level > 2)
-				printk("0x%p ", cmd);
-			/*
-			 * Dump truncated values, so we usually fit within
-			 * 80 chars.
-			 */
-			switch (disposition) {
-			case SUCCESS:
-				printk("SUCCESS\n");
-				break;
-			case NEEDS_RETRY:
-				printk("RETRY\n");
-				break;
-			case ADD_TO_MLQUEUE:
-				printk("MLQUEUE\n");
-				break;
-			case FAILED:
-				printk("FAILED\n");
-				break;
-			case TIMEOUT_ERROR:
-				/* 
-				 * If called via scsi_times_out.
-				 */
-				printk("TIMEOUT\n");
-				break;
-			default:
-				printk("UNKNOWN\n");
-			}
+				scmd_printk(KERN_INFO, cmd, "Done: 0x%p %s\n",
+					cmd,
+					disposition_label[dindex]);
+			else
+				scmd_printk(KERN_INFO, cmd, "Done: %s\n",
+					disposition_label[dindex]);
 			scsi_print_result(cmd);
 			scsi_print_command(cmd);
 			if (status_byte(cmd->result) & CHECK_CONDITION)
