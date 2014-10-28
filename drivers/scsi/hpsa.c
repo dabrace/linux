@@ -5651,6 +5651,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	u32 tagupper, taglower;
 	int refcount, reply_queue;
 
+
 	/* Find the controller of the command to be aborted */
 	h = sdev_to_hba(sc->device);
 	if (WARN(h == NULL,
@@ -5658,8 +5659,10 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 			sc))
 		return FAILED;
 
+	dev_warn(&h->pdev->dev, "abort 0\n");
 	/* if controller locked up, we can guarantee command won't complete */
 	if (lockup_detected(h)) {
+		dev_warn(&h->pdev->dev, "abort 0.1\n");
 		dev_warn(&h->pdev->dev,
 			"scsi %d:%d:%d:%llu scmd %p ABORT FAILED, lockup detected\n",
 			h->scsi_host->host_no, sc->device->channel,
@@ -5670,10 +5673,13 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		/* FIXME eh_timeout_handler would be even better.
 		 * for testing, abort is just being used for timeouts,
 		 * so is equivalent */
+		dev_warn(&h->pdev->dev, "abort 0.2\n");
 		detect_controller_lockup(h);
+		dev_warn(&h->pdev->dev, "abort 0.3\n");
 
 		/* check again in case one just occurred */
 		if (lockup_detected(h)) {
+			dev_warn(&h->pdev->dev, "abort 0.4\n");
 			dev_warn(&h->pdev->dev,
 				"scsi %d:%d:%d:%llu scmd %p ABORT FAILED, lockup detected\n",
 				h->scsi_host->host_no, sc->device->channel,
@@ -5682,11 +5688,13 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		}
 	}
 
+	dev_warn(&h->pdev->dev, "abort 1\n");
 	/* Check that controller supports some kind of task abort */
 	if (!(HPSATMF_PHYS_TASK_ABORT & h->TMFSupportFlags) &&
 		!(HPSATMF_LOG_TASK_ABORT & h->TMFSupportFlags))
 		return FAILED;
 
+	dev_warn(&h->pdev->dev, "abort 2\n");
 	memset(msg, 0, sizeof(msg));
 	ml += sprintf(msg+ml, "scsi %d:%d:%d:%llu scmd %p ABORT ",
 		h->scsi_host->host_no, sc->device->channel,
@@ -5700,18 +5708,21 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		return FAILED;
 	}
 
+	dev_warn(&h->pdev->dev, "abort 3\n");
 	/* Get SCSI command to be aborted */
 	abort = (struct CommandList *) sc->host_scribble;
 	if (abort == NULL) {
 		/* This can happen if the command already completed. */
 		return SUCCESS;
 	}
+	dev_warn(&h->pdev->dev, "abort 4\n");
 	refcount = atomic_inc_return(&abort->refcount);
 	if (refcount == 1) { /* Command is done already. */
 		cmd_free(h, abort);
 		return SUCCESS;
 	}
 
+	dev_warn(&h->pdev->dev, "abort 5\n");
 	/* Don't bother trying the abort if we know it won't work. */
 	if (abort->cmd_type != CMD_IOACCEL2 &&
 		abort->cmd_type != CMD_IOACCEL1 && !dev->supports_aborts) {
@@ -5719,6 +5730,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		return FAILED;
 	}
 
+	dev_warn(&h->pdev->dev, "abort 6\n");
 	/* Check that we're aborting the right command.
 	 * It's possible the CommandList already completed and got re-used.
 	 */
@@ -5726,6 +5738,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		cmd_free(h, abort);
 		return SUCCESS;
 	}
+	dev_warn(&h->pdev->dev, "abort 7\n");
 
 	abort->abort_pending = true;
 	hpsa_get_tag(h, abort, &taglower, &tagupper);
@@ -5738,6 +5751,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 			as->cmd_len, as->cmnd[0], as->cmnd[1],
 			as->serial_number);
 	dev_warn(&h->pdev->dev, "%s BEING SENT\n", msg);
+	dev_warn(&h->pdev->dev, "abort 8 (waiting for abort command to be free)\n");
 
 	/*
 	 * Command is in flight, or possibly already completed
@@ -5751,6 +5765,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		cmd_free(h, abort);
 		return FAILED;
 	}
+	dev_warn(&h->pdev->dev, "abort 9 (got abort command)\n");
 	rc = hpsa_send_abort_both_ways(h, dev->scsi3addr, abort, reply_queue);
 	atomic_inc(&h->abort_cmds_available);
 	wake_up_all(&h->abort_cmd_wait_queue);
@@ -5759,9 +5774,11 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		cmd_free(h, abort);
 		return FAILED;
 	}
+	dev_warn(&h->pdev->dev, "abort 10\n");
 	dev_info(&h->pdev->dev, "%s SENT, SUCCESS\n", msg);
 	wait_event(h->abort_sync_wait_queue, atomic_read(&abort->refcount) == 1);
 	cmd_free(h, abort);
+	dev_warn(&h->pdev->dev, "abort 11\n");
 	return SUCCESS;
 }
 
