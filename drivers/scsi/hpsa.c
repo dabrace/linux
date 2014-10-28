@@ -383,6 +383,30 @@ static ssize_t host_show_lockup_detector(struct device *dev,
 	return snprintf(buf, 20, "%d\n", h->lockup_detector_enabled);
 }
 
+static u32 lockup_detected(struct ctlr_info *h);
+static ssize_t host_show_lockup_detected(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	int i, ld, c, cpu;
+	struct ctlr_info *h;
+	struct Scsi_Host *shost = class_to_shost(dev);
+
+	h = shost_to_hba(shost);
+	ld = lockup_detected(h);
+
+	c = sprintf(buf, "ld=%d: ", ld);
+	cpu = cpumask_first(cpu_online_mask);
+	for (i = 0; i < num_online_cpus(); i++) {
+		u32 *lockup_detected;
+		lockup_detected = per_cpu_ptr(h->lockup_detected, cpu);
+		ld = *lockup_detected;
+		cpu = cpumask_next(cpu, cpu_online_mask);
+		c += sprintf(buf + c, "%d,", ld);
+	}
+	c += sprintf(buf + c, "\n");
+	return c;
+}
+
 static ssize_t host_store_hp_ssd_smart_path_status(struct device *dev,
 					 struct device_attribute *attr,
 					 const char *buf, size_t count)
@@ -812,6 +836,8 @@ static DEVICE_ATTR(resettable, S_IRUGO,
 	host_show_resettable, NULL);
 static DEVICE_ATTR(lockup_detector, S_IWUSR|S_IRUGO,
 	host_show_lockup_detector, host_store_lockup_detector);
+static DEVICE_ATTR(lockup_detected, S_IRUGO,
+	host_show_lockup_detected, NULL);
 
 static struct device_attribute *hpsa_sdev_attrs[] = {
 	&dev_attr_raid_level,
@@ -832,6 +858,7 @@ static struct device_attribute *hpsa_shost_attrs[] = {
 	&dev_attr_hp_ssd_smart_path_status,
 	&dev_attr_raid_offload_debug,
 	&dev_attr_lockup_detector,
+	&dev_attr_lockup_detected,
 	NULL,
 };
 
