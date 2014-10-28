@@ -3217,8 +3217,6 @@ static int hpsa_update_device_info(struct ctlr_info *h,
 
 	unsigned char *inq_buff;
 	unsigned char *obdr_sig;
-	unsigned long flags;
-	int rc, entry;
 
 	inq_buff = kzalloc(OBDR_TAPE_INQ_SIZE, GFP_KERNEL);
 	if (!inq_buff)
@@ -3275,30 +3273,36 @@ static int hpsa_update_device_info(struct ctlr_info *h,
 						OBDR_SIG_LEN) == 0);
 	}
 	kfree(inq_buff);
+	return 0;
 
+bail_out:
+	kfree(inq_buff);
+	return 1;
+}
+
+static void hpsa_update_device_supports_aborts(struct ctlr_info *h,
+			struct hpsa_scsi_dev_t *dev, u8 *scsi3addr)
+{
+	unsigned long flags;
+	int rc, entry;
 	/*
 	 * See if this device supports aborts.  If we already know
 	 * the device, we already know if it supports aborts, otherwise
 	 * we have to find out if it supports aborts by trying one.
 	 */
 	spin_lock_irqsave(&h->devlock, flags);
-	rc = hpsa_scsi_find_entry(this_device, h->dev, h->ndevices, &entry);
+	rc = hpsa_scsi_find_entry(dev, h->dev, h->ndevices, &entry);
 	if ((rc == DEVICE_SAME || rc == DEVICE_UPDATED) &&
 		entry >= 0 && entry < h->ndevices) {
-		this_device->supports_aborts = h->dev[entry]->supports_aborts;
+		dev->supports_aborts = h->dev[entry]->supports_aborts;
 		spin_unlock_irqrestore(&h->devlock, flags);
 	} else {
 		spin_unlock_irqrestore(&h->devlock, flags);
-		this_device->supports_aborts =
+		dev->supports_aborts =
 				hpsa_device_supports_aborts(h, scsi3addr);
-		if (this_device->supports_aborts < 0)
-			this_device->supports_aborts = 0;
+		if (dev->supports_aborts < 0)
+			dev->supports_aborts = 0;
 	}
-	return 0;
-
-bail_out:
-	kfree(inq_buff);
-	return 1;
 }
 
 static unsigned char *ext_target_model[] = {
@@ -3406,6 +3410,7 @@ static int add_ext_target_dev(struct ctlr_info *h,
 	(*n_ext_target_devs)++;
 	hpsa_set_bus_target_lun(this_device,
 				tmpdevice->bus, tmpdevice->target, 0);
+	hpsa_update_device_supports_aborts(h, this_device, scsi3addr);
 	set_bit(tmpdevice->target, lunzerobits);
 	return 1;
 }
@@ -3662,6 +3667,7 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 							&is_OBDR))
 			continue; /* skip it if we can't talk to it. */
 		figure_bus_target_lun(h, lunaddrbytes, tmpdevice);
+		hpsa_update_device_supports_aborts(h, tmpdevice, lunaddrbytes);
 		this_device = currentsd[ncurrent];
 
 		/*
