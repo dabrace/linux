@@ -241,6 +241,7 @@ struct ctlr_info {
 	int	acciopath_status;
 	int	drv_req_rescan;	/* flag for driver to request rescan event */
 	int	raid_offload_debug;
+	int	lockup_detector_enabled;
 };
 
 struct offline_device_entry {
