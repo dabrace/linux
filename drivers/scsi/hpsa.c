@@ -253,6 +253,7 @@ static int hpsa_scsi_ioaccel_queue_command(struct ctlr_info *h,
 	u8 *scsi3addr, struct hpsa_scsi_dev_t *phys_disk);
 static void hpsa_command_resubmit_worker(struct work_struct *work);
 static void print_cfg_table(struct device *dev, struct CfgTable *tb);
+static void detect_controller_lockup(struct ctlr_info *h);
 
 static inline struct ctlr_info *sdev_to_hba(struct scsi_device *sdev)
 {
@@ -5317,6 +5318,21 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 			h->scsi_host->host_no, sc->device->channel,
 			sc->device->id, sc->device->lun, sc);
 		return FAILED;
+	} else {
+		/* good time to check if controller lockup has occurred */
+		/* FIXME eh_timeout_handler would be even better.
+		 * for testing, abort is just being used for timeouts,
+		 * so is equivalent */
+		detect_controller_lockup(h);
+
+		/* check again in case one just occurred */
+		if (lockup_detected(h)) {
+			dev_warn(&h->pdev->dev,
+				"scsi %d:%d:%d:%d scmd %p ABORT FAILED, lockup detected\n",
+				h->scsi_host->host_no, sc->device->channel,
+				sc->device->id, sc->device->lun, sc);
+			return FAILED;
+		}
 	}
 
 	/* Check that controller supports some kind of task abort */
