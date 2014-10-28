@@ -1205,6 +1205,11 @@ static void hpsa_scsi_update_entry(struct ctlr_info *h, int hostno,
 		h->dev[entry]->raid_map = new_entry->raid_map;
 		h->dev[entry]->ioaccel_handle = new_entry->ioaccel_handle;
 	}
+	if (new_entry->hba_ioaccel_enabled) {
+		h->dev[entry]->ioaccel_handle = new_entry->ioaccel_handle;
+		wmb(); /* set ioaccel_handle *before* hba_ioaccel_eanbled */
+	}
+	h->dev[entry]->hba_ioaccel_enabled = new_entry->hba_ioaccel_enabled;
 	h->dev[entry]->offload_config = new_entry->offload_config;
 	h->dev[entry]->offload_to_mirror = new_entry->offload_to_mirror;
 
@@ -3123,6 +3128,7 @@ static int hpsa_update_device_info(struct ctlr_info *h,
 		this_device->offload_config = 0;
 		this_device->offload_enabled = 0;
 		this_device->offload_to_be_enabled = 0;
+		this_device->hba_ioaccel_enabled = 0;
 		this_device->volume_offline = 0;
 	}
 
@@ -3404,6 +3410,8 @@ void hpsa_get_ioaccel_drive_info(struct ctlr_info *h,
 		(struct ext_report_lun_entry *) lunaddrbytes;
 
 	dev->ioaccel_handle = rle->ioaccel_handle;
+	if (PHYS_IOACCEL(lunaddrbytes) && dev->ioaccel_handle)
+		dev->hba_ioaccel_enabled = 1;
 	memset(id_phys, 0, sizeof(*id_phys));
 	rc = hpsa_bmic_id_physical_device(h, lunaddrbytes,
 			GET_BMIC_DRIVE_NUMBER(lunaddrbytes), id_phys,
@@ -3564,28 +3572,21 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 				ncurrent++;
 			break;
 		case TYPE_DISK:
-			if (h->hba_mode_enabled) {
+			if (i >= nphysicals) {
+				ncurrent++;
+				break;
+			}
+
+			if (h->hba_mode_enabled)
 				/* never use raid mapper in HBA mode */
 				this_device->offload_enabled = 0;
-				ncurrent++;
+			else if (!(h->transMethod & CFGTBL_Trans_io_accel1 ||
+				h->transMethod & CFGTBL_Trans_io_accel2))
 				break;
-			} else if (h->acciopath_status) {
-				if (i >= nphysicals) {
-					ncurrent++;
-					break;
-				}
-			} else {
-				if (i < nphysicals)
-					break;
-				ncurrent++;
-				break;
-			}
-			if (h->transMethod & CFGTBL_Trans_io_accel1 ||
-				h->transMethod & CFGTBL_Trans_io_accel2) {
-				hpsa_get_ioaccel_drive_info(h, this_device,
-							lunaddrbytes, id_phys);
-				ncurrent++;
-			}
+
+			hpsa_get_ioaccel_drive_info(h, this_device,
+						lunaddrbytes, id_phys);
+			ncurrent++;
 			break;
 		case TYPE_TAPE:
 		case TYPE_MEDIUM_CHANGER:
@@ -3837,6 +3838,8 @@ static int hpsa_scsi_ioaccel_direct_map(struct ctlr_info *h,
 	struct scsi_cmnd *cmd = c->scsi_cmd;
 	struct hpsa_scsi_dev_t *dev = cmd->device->hostdata;
 
+	c->phys_disk = dev;
+
 	return hpsa_scsi_ioaccel_queue_command(h, c, dev->ioaccel_handle,
 		cmd->cmnd, cmd->cmd_len, dev->scsi3addr, dev);
 }
@@ -3851,8 +3854,6 @@ static void set_encrypt_ioaccel2(struct ctlr_info *h,
 	struct hpsa_scsi_dev_t *dev = cmd->device->hostdata;
 	struct raid_map_data *map = &dev->raid_map;
 	u64 first_block;
-
-	BUG_ON(!(dev->offload_config && dev->offload_enabled));
 
 	/* Are we doing encryption on this device */
 	if (!(map->flags & RAID_MAP_FLAG_ENCRYPT_ON))
@@ -4151,8 +4152,6 @@ static int hpsa_scsi_ioaccel_raid_map(struct ctlr_info *h,
 	u64 tmpdiv;
 #endif
 	int offload_to_mirror;
-
-	BUG_ON(!(dev->offload_config && dev->offload_enabled));
 
 	/* check for valid opcode, get LBA and block count */
 	switch (cmd->cmnd[0]) {
@@ -4562,7 +4561,7 @@ static int hpsa_ioaccel_submit(struct ctlr_info *h,
 			cmd_free(h, c);
 			return SCSI_MLQUEUE_HOST_BUSY;
 		}
-	} else if (dev->ioaccel_handle) {
+	} else if (dev->hba_ioaccel_enabled) {
 		hpsa_cmd_init(h, c->cmdindex, c);
 		c->cmd_type = CMD_SCSI;
 		c->scsi_cmd = cmd;
