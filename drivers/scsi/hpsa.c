@@ -7139,6 +7139,15 @@ static void hpsa_get_max_perf_mode_cmds(struct ctlr_info *h)
 	}
 }
 
+/* If the controller reports that the total max sg entries is greater than 512,
+ * then we know that chained SG blocks work.  (Original smart arrays did not
+ * support chained SG blocks and would return zero for max sg entries.)
+ */
+static int hpsa_supports_chained_sg_blocks(struct ctlr_info *h)
+{
+	return h->maxsgentries > 512;
+}
+
 /* Interrogate the hardware for some limits:
  * max commands, max SG elements without chaining, and with chaining,
  * SG chain block size, etc.
@@ -7149,18 +7158,20 @@ static void hpsa_find_board_params(struct ctlr_info *h)
 	h->nr_cmds = h->max_commands;
 	h->maxsgentries = readl(&(h->cfgtable->MaxScatterGatherElements));
 	h->fw_support = readl(&(h->cfgtable->misc_fw_support));
-	/*
-	 * Limit in-command s/g elements to 32 save dma'able memory.
-	 * Howvever spec says if 0, use 31
-	 */
-	h->max_cmd_sg_entries = 31;
-	if (h->maxsgentries > 512) {
+	if (hpsa_supports_chained_sg_blocks(h)) {
+		/* Limit in-command s/g elements to 32 save dma'able memory. */
 		h->max_cmd_sg_entries = 32;
 		h->chainsize = h->maxsgentries - h->max_cmd_sg_entries;
 		h->maxsgentries--; /* save one for chain pointer */
 	} else {
-		h->chainsize = 0;
+		/* Original smart arrays supported at most 31 scatter gather
+		 * entries embedded inline in the command (trying to use more
+		 * would lock up the controller, see
+		 * https://lkml.org/lkml/2001/12/4/139 ).
+		 */
+		h->max_cmd_sg_entries = 31;
 		h->maxsgentries = 31; /* default to traditional values */
+		h->chainsize = 0;
 	}
 
 	/* Find out what task management functions are supported and cache */
