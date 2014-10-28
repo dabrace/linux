@@ -44,6 +44,11 @@
 #define CMD_UNABORTABLE		0x000C
 #define CMD_TMF_STATUS		0x000D
 #define CMD_IOACCEL_DISABLED	0x000E
+#define CMD_CTLR_LOCKUP		0xffff
+/* Note: CMD_CTLR_LOCKUP is not a value defined by the CISS spec
+ * it is a value defined by the driver that commands can be marked
+ * with when a controller lockup has been detected by the driver
+ */
 
 /* TMF function status values */
 #define CISS_TMF_COMPLETE	0x00
