@@ -7775,7 +7775,6 @@ static void hpsa_free_reply_queues(struct ctlr_info *h)
 static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 {
 	hpsa_free_performant_mode(h);		/* init_one 7 */
-	hpsa_free_ioaccel2_sg_chain_blocks(h);
 	hpsa_free_sg_chain_blocks(h);		/* init_one 6 */
 	hpsa_free_cmd_pool(h);			/* init_one 5 */
 	hpsa_free_irqs(h);			/* init_one 4 */
@@ -8379,7 +8378,6 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	hpsa_free_device_info(h);		/* scan */
 
 	hpsa_unregister_scsi(h);			/* init_one "8" */
-	hpsa_free_ioaccel2_sg_chain_blocks(h);
 	kfree(h->hba_inquiry_data);			/* init_one "8" */
 	hpsa_free_performant_mode(h);			/* init_one 7 */
 	hpsa_free_sg_chain_blocks(h);			/* init_one 6 */
@@ -8683,6 +8681,8 @@ clean_up:
 /* Free ioaccel2 mode command blocks and block fetch table */
 static void hpsa_free_ioaccel2_cmd_and_bft(struct ctlr_info *h)
 {
+	hpsa_free_ioaccel2_sg_chain_blocks(h);
+
 	if (h->ioaccel2_cmd_pool)
 		pci_free_consistent(h->pdev,
 			h->nr_cmds * sizeof(*h->ioaccel2_cmd_pool),
