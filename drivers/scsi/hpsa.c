@@ -1700,10 +1700,14 @@ static int hpsa_slave_alloc(struct scsi_device *sdev)
 	spin_lock_irqsave(&h->devlock, flags);
 	sd = lookup_hpsa_scsi_dev(h, sdev_channel(sdev),
 		sdev_id(sdev), sdev->lun);
-	if (sd && (sd->expose_state & HPSA_SCSI_ADD))
+	if (sd && (sd->expose_state & HPSA_SCSI_ADD)) {
 		sdev->hostdata = sd;
-	else
+		if (sd->queue_depth)
+			scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev),
+						sd->queue_depth);
+	} else {
 		sdev->hostdata = NULL;
+	}
 	spin_unlock_irqrestore(&h->devlock, flags);
 	return 0;
 }
@@ -3305,6 +3309,31 @@ static int hpsa_hba_mode_enabled(struct ctlr_info *h)
 	return hba_mode_enabled;
 }
 
+/* get physical drive ioaccel handle and queue depth */
+void hpsa_get_ioaccel_drive_info(struct ctlr_info *h,
+		struct hpsa_scsi_dev_t *dev,
+		u8 *lunaddrbytes,
+		struct bmic_identify_physical_device *id_phys)
+{
+	int rc;
+	struct ext_report_lun_entry *rle =
+		(struct ext_report_lun_entry *) lunaddrbytes;
+
+	dev->ioaccel_handle = rle->ioaccel_handle;
+	memset(id_phys, 0, sizeof(*id_phys));
+	rc = hpsa_bmic_id_physical_device(h, lunaddrbytes,
+			GET_BMIC_DRIVE_NUMBER(lunaddrbytes), id_phys,
+			sizeof(*id_phys));
+	if (!rc)
+		/* Reserve space for FW operations */
+#define DRIVE_CMDS_RESERVED_FOR_FW 2
+		dev->queue_depth =
+			le16_to_cpu(id_phys->current_queue_depth_limit) -
+				DRIVE_CMDS_RESERVED_FOR_FW;
+	else
+		dev->queue_depth = 7; /* conservative */
+}
+
 static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 {
 	/* the idea here is we could get notified
@@ -3319,6 +3348,7 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 	 */
 	struct ReportExtendedLUNdata *physdev_list = NULL;
 	struct ReportLUNdata *logdev_list = NULL;
+	struct bmic_identify_physical_device *id_phys = NULL;
 	u32 nphysicals = 0;
 	u32 nlogicals = 0;
 	u32 ndev_allocated = 0;
@@ -3333,8 +3363,10 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 	physdev_list = kzalloc(sizeof(*physdev_list), GFP_KERNEL);
 	logdev_list = kzalloc(sizeof(*logdev_list), GFP_KERNEL);
 	tmpdevice = kzalloc(sizeof(*tmpdevice), GFP_KERNEL);
+	id_phys = kzalloc(sizeof(*id_phys), GFP_KERNEL);
 
-	if (!currentsd || !physdev_list || !logdev_list || !tmpdevice) {
+	if (!currentsd || !physdev_list || !logdev_list ||
+		!tmpdevice || !id_phys) {
 		dev_err(&h->pdev->dev, "out of memory\n");
 		goto out;
 	}
@@ -3465,9 +3497,8 @@ static void hpsa_update_scsi_devices(struct ctlr_info *h, int hostno)
 			}
 			if (h->transMethod & CFGTBL_Trans_io_accel1 ||
 				h->transMethod & CFGTBL_Trans_io_accel2) {
-				memcpy(&this_device->ioaccel_handle,
-					&lunaddrbytes[20],
-					sizeof(this_device->ioaccel_handle));
+				hpsa_get_ioaccel_drive_info(h, this_device,
+							lunaddrbytes, id_phys);
 				ncurrent++;
 			}
 			break;
@@ -3503,6 +3534,7 @@ out:
 	kfree(currentsd);
 	kfree(physdev_list);
 	kfree(logdev_list);
+	kfree(id_phys);
 }
 
 /* hpsa_scatter_gather takes a struct scsi_cmnd, (cmd), and does the pci
@@ -4710,10 +4742,7 @@ static int hpsa_register_scsi(struct ctlr_info *h)
 			HPSA_CMDS_RESERVED_FOR_ABORTS -
 			HPSA_CMDS_RESERVED_FOR_DRIVER -
 			HPSA_MAX_CONCURRENT_PASSTHRUS;
-	if (h->hba_mode_enabled)
-		sh->cmd_per_lun = 7;
-	else
-		sh->cmd_per_lun = sh->can_queue;
+	sh->cmd_per_lun = sh->can_queue;
 	sh->sg_tablesize = h->maxsgentries;
 	h->scsi_host = sh;
 	sh->hostdata[0] = (unsigned long) h;
