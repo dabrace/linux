@@ -1705,6 +1705,7 @@ static int hpsa_slave_alloc(struct scsi_device *sdev)
 		if (sd->queue_depth)
 			scsi_adjust_queue_depth(sdev, scsi_get_tag_type(sdev),
 						sd->queue_depth);
+		atomic_set(&sd->ioaccel_cmds_out, 0);
 	} else {
 		sdev->hostdata = NULL;
 	}
@@ -1914,6 +1915,8 @@ static void process_ioaccel2_completion(struct ctlr_info *h,
 {
 	struct io_accel2_cmd *c2 = &h->ioaccel2_cmd_pool[c->cmdindex];
 
+	atomic_dec(&dev->ioaccel_cmds_out);
+
 	/* check for good status */
 	if (likely(c2->error_data.serv_response == 0 &&
 			c2->error_data.status == 0)) {
@@ -2014,6 +2017,7 @@ static void complete_scsi_command(struct CommandList *cp)
 	 */
 	if (cp->cmd_type == CMD_IOACCEL1) {
 		struct io_accel1_cmd *c = &h->ioaccel_cmd_pool[cp->cmdindex];
+		atomic_dec(&dev->ioaccel_cmds_out);
 		cp->Header.SGList = cp->Header.SGTotal = scsi_sg_count(cmd);
 		cp->Request.CDBLen = c->io_flags & IOACCEL1_IOFLAGS_CDBLEN_MASK;
 		cp->Header.tag = c->tag;
@@ -4425,6 +4429,13 @@ static int hpsa_ioaccel_submit(struct ctlr_info *h,
 
 	cmd->host_scribble = (unsigned char *) c;
 
+	/* Try to honor the device's queue depth */
+	atomic_inc(&dev->ioaccel_cmds_out);
+	if (atomic_read(&dev->ioaccel_cmds_out) > dev->queue_depth) {
+		atomic_dec(&dev->ioaccel_cmds_out);
+		return IO_ACCEL_INELIGIBLE;
+	}
+
 	if (dev->offload_enabled) {
 		hpsa_cmd_init(h, c->cmdindex, c);
 		c->cmd_type = CMD_SCSI;
@@ -4434,6 +4445,7 @@ static int hpsa_ioaccel_submit(struct ctlr_info *h,
 			return 0; /* Sent on ioaccel path */
 		if (rc < 0) {   /* scsi_dma_map failed. */
 			cmd_free(h, c);
+			atomic_dec(&dev->ioaccel_cmds_out);
 			return SCSI_MLQUEUE_HOST_BUSY;
 		}
 	} else if (dev->ioaccel_handle) {
@@ -4445,9 +4457,11 @@ static int hpsa_ioaccel_submit(struct ctlr_info *h,
 			return 0; /* Sent on direct map path */
 		if (rc < 0) {   /* scsi_dma_map failed. */
 			cmd_free(h, c);
+			atomic_dec(&dev->ioaccel_cmds_out);
 			return SCSI_MLQUEUE_HOST_BUSY;
 		}
 	}
+	atomic_dec(&dev->ioaccel_cmds_out);
 	return rc;
 }
 
