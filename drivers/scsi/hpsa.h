@@ -266,6 +266,9 @@ struct ctlr_info {
 	atomic_t abort_cmds_available;
 	wait_queue_head_t abort_cmd_wait_queue;
 	wait_queue_head_t abort_sync_wait_queue;
+	atomic_t cmds_sent;
+	int abort_test;
+	int abort_timeout;
 };
 
 struct offline_device_entry {

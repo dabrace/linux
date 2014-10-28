@@ -54,7 +54,7 @@
 #include "hpsa.h"
 
 /* HPSA_DRIVER_VERSION must be 3 byte values (0-255) separated by '.' */
-#define HPSA_DRIVER_VERSION "3.4.8-0"
+#define HPSA_DRIVER_VERSION "3.4.9-0"
 #define DRIVER_NAME "HP HPSA Driver (v " HPSA_DRIVER_VERSION ")"
 #define HPSA "hpsa"
 
@@ -389,6 +389,39 @@ static ssize_t host_show_lockup_detector(struct device *dev,
 
 	h = shost_to_hba(shost);
 	return snprintf(buf, 20, "%d\n", h->lockup_detector_enabled);
+}
+
+static ssize_t host_store_abort_test(struct device *dev,
+				struct device_attribute *attr,
+				const char *buf, size_t count)
+{
+	struct Scsi_Host *shost;
+	struct ctlr_info *h;
+	int len, value, timeout;
+	char tmpbuf[10];
+
+	if (!capable(CAP_SYS_ADMIN) || !capable(CAP_SYS_RAWIO))
+		return -EACCES;
+	len = count > sizeof(tmpbuf) - 1 ? sizeof(tmpbuf) - 1 : count;
+	strncpy(tmpbuf, buf, len);
+	tmpbuf[len] = '\0';
+	if (sscanf(tmpbuf, "%d %d", &value, &timeout) != 2)
+		return -EINVAL;
+	shost = class_to_shost(dev);
+	h = shost_to_hba(shost);
+	h->abort_test = value;
+	h->abort_timeout = timeout;
+	return count;
+}
+
+static ssize_t host_show_abort_test(struct device *dev,
+	     struct device_attribute *attr, char *buf)
+{
+	struct ctlr_info *h;
+	struct Scsi_Host *shost = class_to_shost(dev);
+
+	h = shost_to_hba(shost);
+	return snprintf(buf, 20, "%d %d\n", h->abort_test, h->abort_timeout);
 }
 
 static u32 lockup_detected(struct ctlr_info *h);
@@ -846,6 +879,8 @@ static DEVICE_ATTR(lockup_detector, S_IWUSR|S_IRUGO,
 	host_show_lockup_detector, host_store_lockup_detector);
 static DEVICE_ATTR(lockup_detected, S_IRUGO,
 	host_show_lockup_detected, NULL);
+static DEVICE_ATTR(abort_test, S_IWUSR|S_IRUGO,
+	host_show_abort_test, host_store_abort_test);
 
 static struct device_attribute *hpsa_sdev_attrs[] = {
 	&dev_attr_raid_level,
@@ -867,6 +902,7 @@ static struct device_attribute *hpsa_shost_attrs[] = {
 	&dev_attr_raid_offload_debug,
 	&dev_attr_lockup_detector,
 	&dev_attr_lockup_detected,
+	&dev_attr_abort_test,
 	NULL,
 };
 
@@ -1066,10 +1102,35 @@ static void dial_up_lockup_detection_on_fw_flash_complete(struct ctlr_info *h,
 }
 
 static void __enqueue_cmd_and_start_io(struct ctlr_info *h,
+	struct CommandList *c, int reply_queue);
+
+static void hpsa_abort_torture_worker(struct work_struct *work)
+{
+	struct CommandList *c = container_of(to_delayed_work(work),
+					struct CommandList, abort_torture_work);
+	dev_warn(&c->h->pdev->dev, "Submitting delayed command\n");
+	__enqueue_cmd_and_start_io(c->h, c, DEFAULT_REPLY_QUEUE);
+}
+
+static void __enqueue_cmd_and_start_io(struct ctlr_info *h,
 	struct CommandList *c, int reply_queue)
 {
+	if (h->abort_test > 0 && 
+		(c->cmd_type == CMD_SCSI ||
+			c->cmd_type == CMD_IOACCEL1||
+			c->cmd_type == CMD_IOACCEL2)) {
+		h->abort_test = 0;
+		dev_warn(&h->pdev->dev, "delaying command for %d secs.\n",
+					h->abort_timeout);
+		INIT_DELAYED_WORK(&c->abort_torture_work,
+					hpsa_abort_torture_worker);
+		schedule_delayed_work(&c->abort_torture_work, h->abort_timeout * HZ);
+		atomic_inc(&h->cmds_sent);
+		return;
+	}
 	dial_down_lockup_detection_during_fw_flash(h, c);
 	atomic_inc(&h->commands_outstanding);
+	atomic_inc(&h->cmds_sent);
 	switch (c->cmd_type) {
 	case CMD_IOACCEL1:
 		set_ioaccel1_performant_mode(h, c, reply_queue);
@@ -8065,6 +8126,7 @@ reinit_after_soft_reset:
 	spin_lock_init(&h->scan_lock);
 	atomic_set(&h->passthru_cmds_avail, HPSA_MAX_CONCURRENT_PASSTHRUS);
 	atomic_set(&h->abort_cmds_available, HPSA_CMDS_RESERVED_FOR_ABORTS);
+	atomic_set(&h->cmds_sent, 0);
 
 	h->resubmit_wq = alloc_workqueue("hpsa", WQ_MEM_RECLAIM, 0);
 	if (!h->resubmit_wq) {
