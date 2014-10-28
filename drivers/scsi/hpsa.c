@@ -1083,20 +1083,10 @@ static void __enqueue_cmd_and_start_io(struct ctlr_info *h,
 	}
 }
 
-static void hpsa_mark_as_aborted(struct CommandList *c)
-{
-	struct ErrorInfo *ei = c->err_info;
-
-	ei->CommandStatus = CMD_ABORTED;
-}
-
 static void enqueue_cmd_and_start_io(struct ctlr_info *h, struct CommandList *c)
 {
-	if (unlikely(c->abort_pending)) {
-		hpsa_mark_as_aborted(c);
-		finish_cmd(c);
-		return;
-	}
+	if (unlikely(c->abort_pending))
+		return finish_cmd(c);
 
 	__enqueue_cmd_and_start_io(h, c, DEFAULT_REPLY_QUEUE);
 }
@@ -2303,7 +2293,7 @@ static void complete_scsi_command(struct CommandList *cp)
 	}
 
 	if (cp->abort_pending)
-		hpsa_mark_as_aborted(cp);
+		ei->CommandStatus = CMD_ABORTED;
 
 	/* an error has occurred */
 	switch (ei->CommandStatus) {
