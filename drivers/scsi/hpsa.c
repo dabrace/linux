@@ -5337,9 +5337,7 @@ static int hpsa_eh_device_reset_handler(struct scsi_cmnd *scsicmd)
 	rc = hpsa_send_reset(h, dev->scsi3addr, HPSA_RESET_TYPE_LUN,
 			     DEFAULT_REPLY_QUEUE);
 	if (rc == 0)
-		if (!wait_for_device_to_become_ready(h, dev->scsi3addr,
-						    DEFAULT_REPLY_QUEUE))
-			return SUCCESS;
+		return SUCCESS;
 
 	dev_warn(&h->pdev->dev,
 		"resetting scsi %d:%d:%d:%d failed\n",
