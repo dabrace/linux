@@ -7481,8 +7481,12 @@ static void hpsa_free_pci_init(struct ctlr_info *h)
 	hpsa_free_cfgtables(h);			/* pci_init 4 */
 	iounmap(h->vaddr);			/* pci_init 3 */
 	hpsa_disable_interrupt_mode(h);		/* pci_init 2 */
-	pci_release_regions(h->pdev);		/* pci_init 2 */
+	/*
+	 * call pci_disable_device before pci_release_regions per
+	 * Documentation/PCI/pci.txt
+	 */
 	pci_disable_device(h->pdev);		/* pci_init 1 */
+	pci_release_regions(h->pdev);		/* pci_init 2 */
 }
 
 /* several items must be freed later */
@@ -7505,6 +7509,7 @@ static int hpsa_pci_init(struct ctlr_info *h)
 	err = pci_enable_device(h->pdev);
 	if (err) {
 		dev_err(&h->pdev->dev, "failed to enable PCI device\n");
+		pci_disable_device(h->pdev);
 		return err;
 	}
 
@@ -7515,7 +7520,8 @@ static int hpsa_pci_init(struct ctlr_info *h)
 	if (err) {
 		dev_err(&h->pdev->dev,
 			"failed to obtain PCI resources\n");
-		goto clean1;	/* pci */
+		pci_disable_device(h->pdev);
+		return err;
 	}
 	hpsa_interrupt_mode(h);
 	err = hpsa_pci_find_memory_BAR(h->pdev, &h->paddr);
@@ -7552,9 +7558,12 @@ clean3:	/* vaddr, intmode+region, pci */
 	iounmap(h->vaddr);
 clean2:	/* intmode+region, pci */
 	hpsa_disable_interrupt_mode(h);
-	pci_release_regions(h->pdev);
-clean1:	/* pci */
+	/*
+	 * call pci_disable_device before pci_release_regions per
+	 * Documentation/PCI/pci.txt
+	 */
 	pci_disable_device(h->pdev);
+	pci_release_regions(h->pdev);
 	return err;
 }
 
@@ -7781,6 +7790,10 @@ static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 	hpsa_free_cfgtables(h);			/* pci_init 4 */
 	iounmap(h->vaddr);			/* pci_init 3 */
 	hpsa_disable_interrupt_mode(h);		/* pci_init 2 */
+	/*
+	 * call pci_disable_device before pci_release_regions per
+	 * Documentation/PCI/pci.txt
+	 */
 	pci_disable_device(h->pdev);
 	pci_release_regions(h->pdev);		/* pci_init 2 */
 	kfree(h);				/* init_one 1 */
