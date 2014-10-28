@@ -1871,7 +1871,7 @@ static void hpsa_free_sg_chain_blocks(struct ctlr_info *h)
 	h->cmd_sg_list = NULL;
 }
 
-static int hpsa_allocate_sg_chain_blocks(struct ctlr_info *h)
+static int hpsa_alloc_sg_chain_blocks(struct ctlr_info *h)
 {
 	int i;
 
@@ -7295,7 +7295,7 @@ static void hpsa_free_reply_queues(struct ctlr_info *h)
 static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 {
 	hpsa_free_irqs(h);
-	hpsa_free_sg_chain_blocks(h);
+	hpsa_free_sg_chain_blocks(h);		/* init_one 6 */
 	hpsa_free_ioaccel2_sg_chain_blocks(h);
 	hpsa_free_cmd_pool(h);
 	kfree(h->blockFetchTable);		/* perf 2 */
@@ -7698,7 +7698,7 @@ reinit_after_soft_reset:
 	rc = hpsa_alloc_cmd_pool(h);
 	if (rc)
 		goto clean4;	/* irq, pci, lockup, wq/aer/h */
-	rc = hpsa_allocate_sg_chain_blocks(h);
+	rc = hpsa_alloc_sg_chain_blocks(h);
 	if (rc)
 		goto clean5;	/* cmd, irq, pci, lockup, wq/aer/h */
 	init_waitqueue_head(&h->scan_wait_queue);
@@ -7888,7 +7888,7 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 
 	destroy_workqueue(h->resubmit_wq);
 	hpsa_free_device_info(h);
-	hpsa_free_sg_chain_blocks(h);
+	hpsa_free_sg_chain_blocks(h);		/* init_one 6 */
 	hpsa_free_ioaccel2_sg_chain_blocks(h);
 	kfree(h->blockFetchTable);		/* perf 2 */
 	hpsa_free_reply_queues(h);		/* perf 1 */
