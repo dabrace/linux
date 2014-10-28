@@ -19,8 +19,6 @@
  *
  */
 
-/* test */
-
 #include <linux/module.h>
 #include <linux/interrupt.h>
 #include <linux/types.h>
