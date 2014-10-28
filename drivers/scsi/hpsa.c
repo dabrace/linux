@@ -5148,14 +5148,34 @@ static int hpsa_wait_for_test_unit_ready(struct ctlr_info *h, struct CommandList
 }
 
 static int wait_for_device_to_become_ready(struct ctlr_info *h,
-	unsigned char lunaddr[])
+					   unsigned char lunaddr[],
+					   int reply_queue)
 {
-	int rc;
+	int first_queue;
+	int last_queue;
+	int rq;
+	int rc = 0;
 	struct CommandList *c;
 
 	c = cmd_alloc(h);
 
-	rc = hpsa_wait_for_test_unit_ready(h, c, lunaddr, DEFAULT_REPLY_QUEUE);
+	/* If no specific reply queue was requested, then send the TUR
+	 * repeatedly, requesting a reply on each reply queue; otherwise execute
+	 * the loop exactly once using only the specified queue. */
+	if (likely(reply_queue == DEFAULT_REPLY_QUEUE)) {
+		first_queue = 0;
+		last_queue = h->nreply_queues - 1;
+	} else {
+		first_queue = reply_queue;
+		last_queue = reply_queue;
+	}
+
+	for (rq = first_queue; rq <= last_queue; rq++) {
+		rc = hpsa_wait_for_test_unit_ready(h, c, lunaddr,
+			reply_queue == DEFAULT_REPLY_QUEUE ? rq : reply_queue);
+		if (rc)
+			break;
+	}
 
 	if (rc)
 		dev_warn(&h->pdev->dev, "giving up on device.\n");
@@ -5204,8 +5224,10 @@ static int hpsa_eh_device_reset_handler(struct scsi_cmnd *scsicmd)
 	/* send a reset to the SCSI LUN which the command was sent to */
 	rc = hpsa_send_reset(h, dev->scsi3addr, HPSA_RESET_TYPE_LUN,
 			     DEFAULT_REPLY_QUEUE);
-	if (rc == 0 && wait_for_device_to_become_ready(h, dev->scsi3addr) == 0)
-		return SUCCESS;
+	if (rc == 0)
+		if (!wait_for_device_to_become_ready(h, dev->scsi3addr,
+						    DEFAULT_REPLY_QUEUE))
+			return SUCCESS;
 
 	dev_warn(&h->pdev->dev,
 		"resetting scsi %d:%d:%d:%d failed\n",
@@ -5395,7 +5417,7 @@ static int hpsa_send_reset_as_abort_ioaccel2(struct ctlr_info *h,
 	}
 
 	/* wait for device to recover */
-	if (wait_for_device_to_become_ready(h, psa) != 0) {
+	if (wait_for_device_to_become_ready(h, psa, reply_queue) != 0) {
 		dev_warn(&h->pdev->dev,
 			"Reset as abort: Failed: Device never recovered from reset: 0x%02x%02x%02x%02x%02x%02x%02x%02x\n",
 			psa[0], psa[1], psa[2], psa[3],
