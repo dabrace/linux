@@ -1879,6 +1879,33 @@ retry_cmd:
 	queue_work_on(raw_smp_processor_id(), h->resubmit_wq, &c->work);
 }
 
+/* Returns 0 on success, < 0 otherwise. */
+static int hpsa_evaluate_tmf_status(struct ctlr_info *h,
+					struct CommandList *cp)
+{
+	u8 tmf_status = cp->err_info->ScsiStatus;
+
+	switch (tmf_status) {
+	case CISS_TMF_COMPLETE:
+		/* CISS_TMF_COMPLETE never happens, instead,
+		 * ei->CommandStatus == 0 for this case.
+		 */
+	case CISS_TMF_SUCCESS:
+		return 0;
+	case CISS_TMF_INVALID_FRAME:
+	case CISS_TMF_NOT_SUPPORTED:
+	case CISS_TMF_FAILED:
+	case CISS_TMF_WRONG_LUN:
+	case CISS_TMF_OVERLAPPED_TAG:
+		break;
+	default:
+		dev_warn(&h->pdev->dev, "Unknown TMF status: %02x\n",
+				tmf_status);
+		break;
+	}
+	return -tmf_status;
+}
+
 static void complete_scsi_command(struct CommandList *cp)
 {
 	struct scsi_cmnd *cmd;
@@ -1907,24 +1934,12 @@ static void complete_scsi_command(struct CommandList *cp)
 	if (cp->cmd_type == CMD_IOACCEL2)
 		return process_ioaccel2_completion(h, cp, cmd, dev);
 
-	cmd->result |= ei->ScsiStatus;
-
 	scsi_set_resid(cmd, ei->ResidualCnt);
 	if (ei->CommandStatus == 0) {
 		cmd_free(h, cp);
 		cmd->scsi_done(cmd);
 		return;
 	}
-
-	/* copy the sense data */
-	if (SCSI_SENSE_BUFFERSIZE < sizeof(ei->SenseInfo))
-		sense_data_size = SCSI_SENSE_BUFFERSIZE;
-	else
-		sense_data_size = sizeof(ei->SenseInfo);
-	if (ei->SenseLen < sense_data_size)
-		sense_data_size = ei->SenseLen;
-
-	memcpy(cmd->sense_buffer, ei->SenseInfo, sense_data_size);
 
 	/* For I/O accelerator commands, copy over some fields to the normal
 	 * CISS header used below for error handling.
@@ -1955,6 +1970,15 @@ static void complete_scsi_command(struct CommandList *cp)
 	switch (ei->CommandStatus) {
 
 	case CMD_TARGET_STATUS:
+		cmd->result |= ei->ScsiStatus;
+		/* copy the sense data */
+		if (SCSI_SENSE_BUFFERSIZE < sizeof(ei->SenseInfo))
+			sense_data_size = SCSI_SENSE_BUFFERSIZE;
+		else
+			sense_data_size = sizeof(ei->SenseInfo);
+		if (ei->SenseLen < sense_data_size)
+			sense_data_size = ei->SenseLen;
+		memcpy(cmd->sense_buffer, ei->SenseInfo, sense_data_size);
 		if (ei->ScsiStatus)
 			decode_sense_data(ei->SenseInfo, sense_data_size,
 				&sense_key, &asc, &ascq);
@@ -2051,6 +2075,10 @@ static void complete_scsi_command(struct CommandList *cp)
 	case CMD_UNABORTABLE:
 		cmd->result = DID_ERROR << 16;
 		dev_warn(&h->pdev->dev, "Command unabortable\n");
+		break;
+	case CMD_TMF_STATUS:
+		if (hpsa_evaluate_tmf_status(h, cp)) /* TMF failed? */
+			cmd->result = DID_ERROR << 16;
 		break;
 	case CMD_IOACCEL_DISABLED:
 		/* This only handles the direct pass-through case since RAID
@@ -2877,6 +2905,9 @@ static int hpsa_device_supports_aborts(struct ctlr_info *h,
 	case CMD_UNABORTABLE:
 	case CMD_ABORT_FAILED:
 		rc = 1;
+		break;
+	case CMD_TMF_STATUS:
+		rc = hpsa_evaluate_tmf_status(h, c);
 		break;
 	default:
 		rc = 0;
@@ -4716,6 +4747,9 @@ static int hpsa_send_abort(struct ctlr_info *h, unsigned char *scsi3addr,
 	ei = c->err_info;
 	switch (ei->CommandStatus) {
 	case CMD_SUCCESS:
+		break;
+	case CMD_TMF_STATUS:
+		rc = hpsa_evaluate_tmf_status(h, c);
 		break;
 	case CMD_UNABORTABLE: /* Very common, don't make noise. */
 		rc = -1;
