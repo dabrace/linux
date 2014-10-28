@@ -8693,6 +8693,8 @@ static void hpsa_free_ioaccel2_cmd_and_bft(struct ctlr_info *h)
 /* Allocate ioaccel2 mode command blocks and block fetch table */
 static int hpsa_alloc_ioaccel2_cmd_and_bft(struct ctlr_info *h)
 {
+	int rc;
+
 	/* Allocate ioaccel2 mode command blocks and block fetch table */
 
 	h->ioaccel_maxsg =
@@ -8712,10 +8714,13 @@ static int hpsa_alloc_ioaccel2_cmd_and_bft(struct ctlr_info *h)
 				sizeof(u32)), GFP_KERNEL);
 
 	if ((h->ioaccel2_cmd_pool == NULL) ||
-		(h->ioaccel2_blockFetchTable == NULL))
+		(h->ioaccel2_blockFetchTable == NULL)) {
+		rc = -ENOMEM;
 		goto clean_up;
+	}
 
-	if (hpsa_allocate_ioaccel2_sg_chain_blocks(h))
+	rc = hpsa_allocate_ioaccel2_sg_chain_blocks(h);
+	if (rc)
 		goto clean_up;
 
 	memset(h->ioaccel2_cmd_pool, 0,
@@ -8724,7 +8729,7 @@ static int hpsa_alloc_ioaccel2_cmd_and_bft(struct ctlr_info *h)
 
 clean_up:
 	hpsa_free_ioaccel2_cmd_and_bft(h);
-	return -ENOMEM;
+	return rc;
 }
 
 /* Free items allocated by hpsa_put_ctlr_into_performant_mode */
