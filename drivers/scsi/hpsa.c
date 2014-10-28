@@ -4548,6 +4548,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	char msg[256];		/* For debug messaging. */
 	int ml = 0;
 	u32 tagupper, taglower;
+	int refcount;
 
 	/* Find the controller of the command to be aborted */
 	h = sdev_to_hba(sc->device);
@@ -4576,9 +4577,13 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	/* Get SCSI command to be aborted */
 	abort = (struct CommandList *) sc->host_scribble;
 	if (abort == NULL) {
-		dev_err(&h->pdev->dev, "%s FAILED, Command to abort is NULL.\n",
-				msg);
-		return FAILED;
+		/* This can happen if the command already completed. */
+		return SUCCESS;
+	}
+	refcount = atomic_inc_return(&abort->refcount);
+	if (refcount == 1) { /* Command is done already. */
+		cmd_free(h, abort);
+		return SUCCESS;
 	}
 	hpsa_get_tag(h, abort, &taglower, &tagupper);
 	ml += sprintf(msg+ml, "Tag:0x%08x:%08x ", tagupper, taglower);
@@ -4600,6 +4605,7 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 		dev_warn(&h->pdev->dev, "FAILED abort on device C%d:B%d:T%d:L%d\n",
 			h->scsi_host->host_no,
 			dev->bus, dev->target, dev->lun);
+		cmd_free(h, abort);
 		return FAILED;
 	}
 	dev_info(&h->pdev->dev, "%s REQUEST SUCCEEDED.\n", msg);
@@ -4611,18 +4617,19 @@ static int hpsa_eh_abort_handler(struct scsi_cmnd *sc)
 	 */
 #define ABORT_COMPLETE_WAIT_SECS 30
 	for (i = 0; i < ABORT_COMPLETE_WAIT_SECS * 10; i++) {
-		if (test_bit(abort->cmdindex & (BITS_PER_LONG - 1),
-				h->cmd_pool_bits +
-				(abort->cmdindex / BITS_PER_LONG)))
-			msleep(100);
-		else
+		refcount = atomic_read(&abort->refcount);
+		if (refcount < 2) {
+			cmd_free(h, abort);
 			return SUCCESS;
+		} else {
+			msleep(100);
+		}
 	}
 	dev_warn(&h->pdev->dev, "%s FAILED. Aborted command has not completed after %d seconds.\n",
 		msg, ABORT_COMPLETE_WAIT_SECS);
+	cmd_free(h, abort);
 	return FAILED;
 }
-
 
 /*
  * For operations that cannot sleep, a command block is allocated at init,
@@ -4636,7 +4643,8 @@ static struct CommandList *cmd_alloc(struct ctlr_info *h)
 	int i;
 	union u64bit temp64;
 	dma_addr_t cmd_dma_handle, err_dma_handle;
-	int loopcount;
+	int refcount;
+	unsigned long offset = 0;
 
 	/* There is some *extremely* small but non-zero chance that that
 	 * multiple threads could get in here, and one thread could
@@ -4649,23 +4657,27 @@ static struct CommandList *cmd_alloc(struct ctlr_info *h)
 	 * infrequently as to be indistinguishable from never.
 	 */
 
-	loopcount = 0;
-	do {
-		i = find_first_zero_bit(h->cmd_pool_bits, h->nr_cmds);
-		if (i == h->nr_cmds)
-			i = 0;
-		loopcount++;
-	} while (test_and_set_bit(i & (BITS_PER_LONG - 1),
-		  h->cmd_pool_bits + (i / BITS_PER_LONG)) != 0 &&
-		loopcount < 10);
+	for (;;) {
+		i = find_next_zero_bit(h->cmd_pool_bits, h->nr_cmds, offset);
+		if (unlikely(i == h->nr_cmds)) {
+			offset = 0;
+			continue;
+		}
+		c = h->cmd_pool + i;
+		refcount = atomic_inc_return(&c->refcount);
+		if (unlikely(refcount > 1)) {
+			cmd_free(h, c); /* already in use */
+			offset = (i + 1) % h->nr_cmds;
+			continue;
+		}
+		set_bit(i & (BITS_PER_LONG - 1),
+			h->cmd_pool_bits + (i / BITS_PER_LONG));
+		break; /* it's ours now. */
+	}
 
-	/* Thread got starved?  We do not expect this to ever happen. */
-	if (loopcount >= 10 && i == h->nr_cmds)
-		return NULL;
-
-	c = h->cmd_pool + i;
-	memset(c, 0, sizeof(*c));
-	c->Header.tag = cpu_to_le64((u64) i << DIRECT_LOOKUP_SHIFT);
+	/* Zero out all of commandlist except the last field, refcount */
+	memset(c, 0, offsetof(struct CommandList, refcount));
+	c->Header.tag = cpu_to_le64((u64) (i << DIRECT_LOOKUP_SHIFT));
 	cmd_dma_handle = h->cmd_pool_dhandle + i * sizeof(*c);
 	c->err_info = h->errinfo_pool + i;
 	memset(c->err_info, 0, sizeof(*c->err_info));
@@ -4685,11 +4697,13 @@ static struct CommandList *cmd_alloc(struct ctlr_info *h)
 
 static void cmd_free(struct ctlr_info *h, struct CommandList *c)
 {
-	int i;
+	if (atomic_dec_and_test(&c->refcount)) {
+		int i;
 
-	i = c - h->cmd_pool;
-	clear_bit(i & (BITS_PER_LONG - 1),
-		  h->cmd_pool_bits + (i / BITS_PER_LONG));
+		i = c - h->cmd_pool;
+		clear_bit(i & (BITS_PER_LONG - 1),
+			  h->cmd_pool_bits + (i / BITS_PER_LONG));
+	}
 }
 
 #ifdef CONFIG_COMPAT
