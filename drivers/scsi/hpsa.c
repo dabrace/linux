@@ -7181,7 +7181,27 @@ static void hpsa_irq_affinity_hints(struct ctlr_info *h)
 	}
 }
 
-static int hpsa_request_irq(struct ctlr_info *h,
+/* clear affinity hints and free MSI-X, MSI, or legacy INTx vectors */
+static void hpsa_free_irqs(struct ctlr_info *h)
+{
+	int i;
+
+	if (!h->msix_vector || h->intr_mode != PERF_MODE_INT) {
+		/* Single reply queue, only one irq to free */
+		i = h->intr_mode;
+		irq_set_affinity_hint(h->intr[i], NULL);
+		free_irq(h->intr[i], &h->q[i]);
+		return;
+	}
+
+	for (i = 0; i < h->msix_vector; i++) {
+		irq_set_affinity_hint(h->intr[i], NULL);
+		free_irq(h->intr[i], &h->q[i]);
+	}
+}
+
+/* returns 0 on success; cleans up and returns -Enn on error */
+static int hpsa_request_irqs(struct ctlr_info *h,
 	irqreturn_t (*msixhandler)(int, void *),
 	irqreturn_t (*intxhandler)(int, void *))
 {
@@ -7214,8 +7234,9 @@ static int hpsa_request_irq(struct ctlr_info *h,
 		}
 	}
 	if (rc) {
-		dev_err(&h->pdev->dev, "unable to get irq %d for %s\n",
+		dev_err(&h->pdev->dev, "failed to get irq %d for %s\n",
 		       h->intr[h->intr_mode], h->devname);
+		hpsa_free_irqs(h);
 		return -ENODEV;
 	}
 	return 0;
@@ -7241,38 +7262,6 @@ static int hpsa_kdump_soft_reset(struct ctlr_info *h)
 	return 0;
 }
 
-static void free_irqs(struct ctlr_info *h)
-{
-	int i;
-
-	if (!h->msix_vector || h->intr_mode != PERF_MODE_INT) {
-		/* Single reply queue, only one irq to free */
-		i = h->intr_mode;
-		irq_set_affinity_hint(h->intr[i], NULL);
-		free_irq(h->intr[i], &h->q[i]);
-		return;
-	}
-
-	for (i = 0; i < h->msix_vector; i++) {
-		irq_set_affinity_hint(h->intr[i], NULL);
-		free_irq(h->intr[i], &h->q[i]);
-	}
-}
-
-static void hpsa_free_irqs_and_disable_msix(struct ctlr_info *h)
-{
-	free_irqs(h);
-#ifdef CONFIG_PCI_MSI
-	if (h->msix_vector) {
-		if (h->pdev->msix_enabled)
-			pci_disable_msix(h->pdev);
-	} else if (h->msi_vector) {
-		if (h->pdev->msi_enabled)
-			pci_disable_msi(h->pdev);
-	}
-#endif /* CONFIG_PCI_MSI */
-}
-
 static void hpsa_free_reply_queues(struct ctlr_info *h)
 {
 	int i;
@@ -7289,7 +7278,7 @@ static void hpsa_free_reply_queues(struct ctlr_info *h)
 
 static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 {
-	hpsa_free_irqs_and_disable_msix(h);
+	hpsa_free_irqs(h);
 	hpsa_free_sg_chain_blocks(h);
 	hpsa_free_ioaccel2_sg_chain_blocks(h);
 	hpsa_free_cmd_pool(h);
@@ -7302,6 +7291,7 @@ static void hpsa_undo_allocations_after_kdump_soft_reset(struct ctlr_info *h)
 		iounmap(h->transtable);
 	if (h->cfgtable)
 		iounmap(h->cfgtable);
+	hpsa_disable_interrupt_mode(h);
 	pci_disable_device(h->pdev);
 	pci_release_regions(h->pdev);
 	kfree(h);
@@ -7686,7 +7676,7 @@ reinit_after_soft_reset:
 	/* make sure the board interrupts are off */
 	h->access.set_intr_mask(h, HPSA_INTR_OFF);
 
-	if (hpsa_request_irq(h, do_hpsa_intr_msi, do_hpsa_intr_intx))
+	if (hpsa_request_irqs(h, do_hpsa_intr_msi, do_hpsa_intr_intx))
 		goto clean2;
 	dev_info(&pdev->dev, "%s: <0x%x> at IRQ %d%s using DAC\n",
 	       h->devname, pdev->device,
@@ -7722,8 +7712,8 @@ reinit_after_soft_reset:
 		spin_lock_irqsave(&h->lock, flags);
 		h->access.set_intr_mask(h, HPSA_INTR_OFF);
 		spin_unlock_irqrestore(&h->lock, flags);
-		free_irqs(h);
-		rc = hpsa_request_irq(h, hpsa_msix_discard_completions,
+		hpsa_free_irqs(h);
+		rc = hpsa_request_irqs(h, hpsa_msix_discard_completions,
 					hpsa_intx_discard_completions);
 		if (rc) {
 			dev_warn(&h->pdev->dev,
@@ -7786,7 +7776,7 @@ reinit_after_soft_reset:
 clean4:
 	hpsa_free_sg_chain_blocks(h);
 	hpsa_free_cmd_pool(h);
-	free_irqs(h);
+	hpsa_free_irqs(h);
 clean2:
 clean1:
 	if (h->resubmit_wq)
@@ -7839,7 +7829,8 @@ static void hpsa_shutdown(struct pci_dev *pdev)
 	 */
 	hpsa_flush_cache(h);
 	h->access.set_intr_mask(h, HPSA_INTR_OFF);
-	hpsa_free_irqs_and_disable_msix(h);
+	hpsa_free_irqs(h);
+	hpsa_disable_interrupt_mode(h);		/* pci_init 2 */
 }
 
 static void hpsa_free_device_info(struct ctlr_info *h)
@@ -7868,7 +7859,10 @@ static void hpsa_remove_one(struct pci_dev *pdev)
 	cancel_delayed_work_sync(&h->rescan_ctlr_work);
 	spin_unlock_irqrestore(&h->lock, flags);
 	hpsa_unregister_scsi(h);	/* unhook from SCSI subsystem */
+
+	/* includes hpsa_free_irqs and hpsa_disable_interrupt_mode */
 	hpsa_shutdown(pdev);
+
 	destroy_workqueue(h->resubmit_wq);
 	iounmap(h->vaddr);
 	iounmap(h->transtable);
